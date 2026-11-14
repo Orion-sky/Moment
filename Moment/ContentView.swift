@@ -98,6 +98,27 @@ struct ContentView: View {
                     }
                 }
                 .animation(.easeInOut(duration: 0.2), value: store.culling)
+                .overlay {
+                    // 翻到第一张 / 最后一张时的提示,在没被面板遮住的区域里居中
+                    if let notice = store.edgeNotice {
+                        Text(notice.text)
+                            .font(.title3.weight(.medium))
+                            .padding(.horizontal, 20)
+                            .padding(.vertical, 12)
+                            .glassEffect(.regular, in: .capsule)
+                            .padding(.trailing, infoInset)
+                            .padding(.bottom, stripInset)
+                            .padding(.top, topInset)
+                            .allowsHitTesting(false)
+                            .transition(.opacity.combined(with: .scale(scale: 0.92)))
+                            // 每次提示(包括按住不放连续触发)都重新计时,1.2 秒后消失
+                            .task(id: notice.id) {
+                                try? await Task.sleep(for: .seconds(1.2))
+                                if !Task.isCancelled, store.edgeNotice?.id == notice.id { store.edgeNotice = nil }
+                            }
+                    }
+                }
+                .animation(.easeOut(duration: 0.18), value: store.edgeNotice?.text)
                 .onGeometryChange(for: CGSize.self) { $0.size } action: { store.photoAreaSize = $0 }
                 if hasImages && showInfo {
                     // 液态玻璃:信息栏浮在照片区域上面。照片放大后会延伸到它下面,透过玻璃能看到

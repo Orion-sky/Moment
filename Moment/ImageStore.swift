@@ -256,13 +256,26 @@ final class ImageStore: ObservableObject {
             .sorted { $0.lastPathComponent.localizedStandardCompare($1.lastPathComponent) == .orderedAscending }
     }
 
+    /// 翻到头 / 尾时的提示,显示一小会儿后自动消失
+    @Published var edgeNotice: EdgeNotice?
+
+    struct EdgeNotice: Identifiable, Equatable {
+        let id = UUID()
+        let text: String
+    }
+
     /// 最近一次选中项变化是不是鼠标点出来的(缩略图条据此决定要不要重新居中)。不触发刷新
     private(set) var selectionByClick = false
 
     func move(_ delta: Int) {
         guard !images.isEmpty else { return }
         selectionByClick = false
-        selection = min(max(selection + delta, 0), images.count - 1)
+        let target = selection + delta
+        // 已经在头或尾还继续翻:给个提示,不然按了没反应会以为是卡住了
+        if target < 0 { edgeNotice = EdgeNotice(text: "已经是第一张") }
+        else if target > images.count - 1 { edgeNotice = EdgeNotice(text: "已经是最后一张") }
+        else if edgeNotice != nil { edgeNotice = nil }
+        selection = min(max(target, 0), images.count - 1)
         selected = [selection]
         anchor = selection
     }
