@@ -4,6 +4,7 @@ import Combine
 /// 可以自定义按键的操作
 enum ShortcutAction: String, CaseIterable, Identifiable {
     case previous, next, toggleMode, toggleInfo, toggleStrip, zoomIn, zoomOut, zoomReset
+    case toggleCulling, togglePick
     var id: Self { self }
 
     var title: String {
@@ -16,6 +17,8 @@ enum ShortcutAction: String, CaseIterable, Identifiable {
         case .zoomIn: "放大"
         case .zoomOut: "缩小"
         case .zoomReset: "适应窗口"
+        case .toggleCulling: "开关筛选模式"
+        case .togglePick: "标记 / 取消标记照片(自动进入筛选模式)"
         }
     }
 
@@ -29,6 +32,8 @@ enum ShortcutAction: String, CaseIterable, Identifiable {
         case .zoomIn: "="
         case .zoomOut: "-"
         case .zoomReset: "0"
+        case .toggleCulling: "c"
+        case .togglePick: " "
         }
     }
 
@@ -102,8 +107,62 @@ final class ShortcutStore: ObservableObject {
     }
 }
 
-/// 设置窗口(⌘,)
+/// 设置窗口(⌘,):顶部分栏
 struct SettingsView: View {
+    var body: some View {
+        TabView {
+            Tab("通用", systemImage: "gearshape") { GeneralSettings() }
+            Tab("快捷键", systemImage: "keyboard") { ShortcutSettings() }
+            Tab("固定按键", systemImage: "list.bullet.rectangle") { FixedKeysSettings() }
+        }
+        .frame(width: 480)
+    }
+}
+
+/// 通用:外观、主图缩放
+private struct GeneralSettings: View {
+    @AppStorage("appearance") private var appearance = AppAppearance.system
+    @AppStorage("wheelZoomSpeed") private var wheelZoomSpeed = 1.0
+
+    var body: some View {
+        Form {
+            Section("外观") {
+                Picker("外观", selection: $appearance) {
+                    ForEach(AppAppearance.allCases) { Text($0.title).tag($0) }
+                }
+                .pickerStyle(.segmented)
+                .onChange(of: appearance) { appearance.apply() }
+            }
+
+            Section {
+                LabeledContent("滚轮缩放速度") {
+                    HStack(spacing: 8) {
+                        Text("慢").foregroundStyle(.secondary)
+                        Slider(value: $wheelZoomSpeed, in: 0.25...3, step: 0.25)
+                            .frame(width: 170)
+                        Text("快").foregroundStyle(.secondary)
+                        Text(String(format: "%.2g×", wheelZoomSpeed))
+                            .monospacedDigit()
+                            .frame(width: 40, alignment: .trailing)
+                    }
+                }
+                if wheelZoomSpeed != 1 {
+                    Button("恢复默认速度") { wheelZoomSpeed = 1 }
+                }
+            } header: {
+                Text("主图缩放")
+            } footer: {
+                Text("用鼠标滚轮缩放主图的快慢。轻轻一拨就变化太大时调慢;要滚很久才放大时调快。")
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .formStyle(.grouped)
+        .fixedSize(horizontal: false, vertical: true)
+    }
+}
+
+/// 快捷键:可以自定义的单键操作
+private struct ShortcutSettings: View {
     @ObservedObject private var shortcuts = ShortcutStore.shared
     /// 正在等待按键的那一项
     @State private var recording: ShortcutAction?
@@ -126,19 +185,9 @@ struct SettingsView: View {
                         .tint(recording == action ? .accentColor : nil)
                     }
                 }
-            } header: {
-                Text("快捷键")
             } footer: {
                 Text("点击右侧的按钮,再按下想用的键。可以用字母、数字、符号和空格;这个键已经被别的操作使用时,两者会互换。按 Esc 取消。")
                     .foregroundStyle(.secondary)
-            }
-
-            Section("固定的按键") {
-                LabeledContent("上一张 / 下一张", value: "← / →")
-                LabeledContent("瀑布流里打开选中的照片", value: "回车 或 双击")
-                LabeledContent("退出全屏", value: "Esc")
-                LabeledContent("瀑布流里调整每行张数", value: "⌘ + 滚轮")
-                LabeledContent("多选", value: "Shift / ⌘ + 点击")
             }
 
             Section {
@@ -149,7 +198,6 @@ struct SettingsView: View {
             }
         }
         .formStyle(.grouped)
-        .frame(width: 460)
         .fixedSize(horizontal: false, vertical: true)
         .focusable()
         .focused($focused)
@@ -162,5 +210,34 @@ struct SettingsView: View {
             recording = nil
             return .handled
         }
+        // 切到别的分栏时,不再等待按键
+        .onDisappear { recording = nil }
+    }
+}
+
+/// 固定按键:不能自定义的,只读
+private struct FixedKeysSettings: View {
+    var body: some View {
+        Form {
+            Section {
+                LabeledContent("上一张 / 下一张", value: "← / →")
+                LabeledContent("瀑布流里打开选中的照片", value: "回车 或 双击")
+                LabeledContent("退出筛选模式;不在筛选模式时退出全屏", value: "Esc")
+                LabeledContent("瀑布流里调整每行张数", value: "⌘ + 滚轮")
+                LabeledContent("多选", value: "Shift / ⌘ + 点击")
+            } header: {
+                Text("鼠标和键盘")
+            }
+
+            Section("菜单快捷键") {
+                LabeledContent("打开文件夹", value: "⌘O")
+                LabeledContent("普通模式 / 瀑布流模式", value: "⌘1 / ⌘2")
+                LabeledContent("放大 / 缩小 / 适应窗口", value: "⌘+ / ⌘- / ⌘0")
+                LabeledContent("开关缩略图条 / 信息栏", value: "⌥⌘T / ⌥⌘I")
+                LabeledContent("设置", value: "⌘,")
+            }
+        }
+        .formStyle(.grouped)
+        .fixedSize(horizontal: false, vertical: true)
     }
 }

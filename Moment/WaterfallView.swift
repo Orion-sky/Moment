@@ -133,7 +133,8 @@ struct WaterfallView: View {
                         position.scrollTo(y: y)
                     }
                     .padding(.vertical, 6)
-                    .padding(.trailing, 2)
+                    // 离右边(信息栏)留一点距离;左边和照片的距离由 scrollbarGutter 保证
+                    .padding(.trailing, 6)
                 }
                 .overlay(alignment: .bottom) {
                     if store.aspectsLoaded < store.images.count {
@@ -177,6 +178,7 @@ struct WaterfallView: View {
                       // 选中的这张:清晰缩略图还没读出来时先用主图顶着,
                       // 否则衔接动画飞到位后会露出一下灰色占位
                       fallback: index == store.selection ? store.mainImage : nil,
+                      picked: store.picked.contains(store.images[index]),
                       selected: store.selected.contains(index),
                       current: index == store.selection)
             // 衔接动画进行时,选中的格子由飞行中的那张代替
@@ -321,6 +323,7 @@ struct WaterfallCell: View {
     /// 在瀑布流里的位置,加载队列按它到当前关注点的距离排先后
     let point: CGPoint
     let fallback: NSImage?
+    var picked = false
     let selected: Bool
     let current: Bool
     @State private var image: NSImage?
@@ -344,6 +347,9 @@ struct WaterfallCell: View {
                 .fill(Color.accentColor.opacity(selected && !current ? 0.25 : 0)))
             .overlay(RoundedRectangle(cornerRadius: 4)
                 .stroke(Color.accentColor.opacity(current ? 1 : 0.6), lineWidth: current ? 3 : (selected ? 2 : 0)))
+            .overlay(alignment: .topTrailing) {
+                if picked { PickBadge(size: 22).padding(6) }
+            }
             .contentShape(Rectangle())
             .task(id: LoadKey(url: url, size: pixelSize)) {
                 let cache = ThumbnailCache.shared

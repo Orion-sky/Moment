@@ -33,6 +33,14 @@ struct ContentView: View {
             // 瀑布流模式本来就没有缩略图条
             guard store.mode == .single else { return false }
             showStrip.toggle()
+        case .toggleCulling:
+            guard hasImages else { return false }
+            store.culling.toggle()
+        case .togglePick:
+            // 不在筛选模式时,先进入再标记:按一下就开始挑片
+            guard hasImages else { return false }
+            if !store.culling { store.culling = true }
+            store.togglePick()
         case .zoomIn: store.zoomRequests.send(1.25)
         case .zoomOut: store.zoomRequests.send(0.8)
         case .zoomReset: store.zoomRequests.send(0)
@@ -41,19 +49,26 @@ struct ContentView: View {
     }
 
     var body: some View {
-        // 缩略图条(116)加上下留白(8 + 8)在普通模式下占掉的高度,衔接动画要用
+        // 缩略图条(116)加上下留白(8 + 8)在普通模式下盖住的高度,衔接动画要用
         let _ = (store.stripExtraHeight = showStrip ? 132 : 0)
-        VStack(spacing: 0) {
-            HStack(spacing: 0) {
+        // 信息栏浮在照片区域上面,这是它盖住的宽度(面板 280 + 右边留白 8)
+        let infoInset: CGFloat = hasImages && showInfo ? 288 : 0
+        let _ = (store.trailingInset = infoInset)
+        // 缩略图条也浮在照片区域上面,这是它盖住的高度(面板 116 + 上下留白各 8)
+        let stripInset: CGFloat = hasImages && showStrip && store.mode == .single ? 132 : 0
+        ZStack {
+            ZStack {
                 ZStack {
                     // 两种模式共用的底色:主图瞬间移除时不会闪一下
                     Color(nsColor: .underPageBackgroundColor)
                     if store.mode == .waterfall && hasImages {
+                        // 瀑布流不能被信息栏挡住,让出右边
                         WaterfallView()
+                            .padding(.trailing, infoInset)
                             .transition(.opacity)
                     } else {
                         // 离开时立即移除:飞行中的那张会在同一位置接上
-                        ViewerArea()
+                        ViewerArea(trailingInset: infoInset, bottomInset: stripInset)
                             .transition(.asymmetric(insertion: .opacity, removal: .identity))
                     }
                 }
@@ -69,23 +84,37 @@ struct ContentView: View {
                     }
                 }
                 .clipped()
+                .overlay(alignment: .top) {
+                    if store.culling && hasImages {
+                        CullingBar()
+                            .padding(.top, 10)
+                            .padding(.trailing, infoInset)
+                            .transition(.move(edge: .top).combined(with: .opacity))
+                    }
+                }
+                .animation(.easeInOut(duration: 0.2), value: store.culling)
                 .onGeometryChange(for: CGSize.self) { $0.size } action: { store.photoAreaSize = $0 }
                 if hasImages && showInfo {
-                    // 液态玻璃:信息栏是浮在背景上的一块圆角玻璃面板
+                    // 液态玻璃:信息栏浮在照片区域上面。照片放大后会延伸到它下面,透过玻璃能看到
                     InfoPanel()
                         .frame(width: 280)
                         .clipShape(.rect(cornerRadius: panelRadius))
                         .glassEffect(.regular, in: .rect(cornerRadius: panelRadius))
-                        .padding([.top, .bottom, .trailing], 8)
+                        .padding([.top, .trailing], 8)
+                        // 缩略图条在的时候,信息栏停在它上方,两块面板不重叠
+                        .padding(.bottom, stripInset > 0 ? stripInset : 8)
+                        .frame(maxWidth: .infinity, alignment: .trailing)
                         .transition(.move(edge: .trailing).combined(with: .opacity))
                 }
             }
-            if hasImages && showStrip && store.mode == .single {
+            if stripInset > 0 {
+                // 缩略图条同样浮在照片区域上面,照片放大后会延伸到它下面
                 ThumbnailStrip()
                     .frame(height: 116)
                     .clipShape(.rect(cornerRadius: panelRadius))
                     .glassEffect(.regular, in: .rect(cornerRadius: panelRadius))
                     .padding(8)
+                    .frame(maxHeight: .infinity, alignment: .bottom)
                     .transition(.move(edge: .bottom).combined(with: .opacity))
             }
         }
@@ -141,6 +170,11 @@ struct ContentView: View {
 
             // 右侧:面板开关和外观(信息栏开关正好在信息栏上方)
             ToolbarItemGroup(placement: .primaryAction) {
+                Toggle(isOn: $store.culling) {
+                    Label("筛选模式", systemImage: "checkmark.circle")
+                }
+                .help(store.culling ? "退出筛选模式" : "筛选模式:标记照片,再复制或移动到别的文件夹")
+
                 Toggle(isOn: $showStrip) {
                     Label("缩略图条", systemImage: "rectangle.bottomthird.inset.filled")
                 }
@@ -171,7 +205,7 @@ struct ContentView: View {
         .focused($keyFocus)
         .focusEffectDisabled()
         .onAppear { keyFocus = true }
-        .alert("无法删除", isPresented: Binding(get: { store.errorMessage != nil },
+        .alert(store.alertTitle, isPresented: Binding(get: { store.errorMessage != nil },
                                               set: { if !$0 { store.errorMessage = nil } })) {
             Button("好") {}
         } message: {
@@ -179,6 +213,11 @@ struct ContentView: View {
         }
         .onChange(of: store.selection) { keyFocus = true }
         .onKeyPress(.escape) {
+            // 筛选模式下,Esc 先退出筛选模式(全屏时也是先退这个,再按一次才退出全屏)
+            if store.culling {
+                store.culling = false
+                return .handled
+            }
             // 全屏时按 Esc 退出全屏(主界面拿着键盘焦点,系统默认的这个行为到不了窗口)
             guard let window = NSApp.keyWindow, window.styleMask.contains(.fullScreen) else { return .ignored }
             window.toggleFullScreen(nil)
@@ -234,12 +273,18 @@ struct HeroOverlay: View {
 /// 主图显示区
 struct ViewerArea: View {
     @EnvironmentObject var store: ImageStore
+    /// 右侧被信息栏盖住的宽度、底部被缩略图条盖住的高度
+    var trailingInset: CGFloat = 0
+    var bottomInset: CGFloat = 0
+    /// 放大时左下角有导航小图
+    @State private var navigatorVisible = false
 
     var body: some View {
         ZStack {
             Color(nsColor: .underPageBackgroundColor)
             if let image = store.mainImage {
-                ZoomableImage(image: image)
+                ZoomableImage(image: image, trailingInset: trailingInset, bottomInset: bottomInset,
+                              navigatorVisible: $navigatorVisible)
                     .id(store.current)
                     // 衔接动画进行时由飞行中的那张代替,结束后原位出现
                     .opacity(store.hero == nil ? 1 : 0)
@@ -265,11 +310,26 @@ struct ViewerArea: View {
                 }
             }
         }
+        .overlay(alignment: .topLeading) {
+            // 筛选模式下,当前照片被标记时在角上显示(左下角留给放大时的导航小图)
+            if store.culling, let url = store.current, store.picked.contains(url), store.hero == nil {
+                Label("已标记", systemImage: "checkmark.circle.fill")
+                    .font(.callout.weight(.medium))
+                    .padding(.horizontal, 10).padding(.vertical, 6)
+                    .glassEffect(.regular.tint(.green.opacity(0.5)), in: .capsule)
+                    .padding(14)
+            }
+        }
         .overlay(alignment: .leading) {
+            // 左侧的翻页热区是从上到下一整条,会盖住左下角的导航小图、把它的拖动截走。
+            // 小图显示时,热区让出下面这一段(小图最高 150,加上下留白)
             PageArrow(systemImage: "chevron.left", enabled: store.selection > 0) { store.move(-1) }
+                .padding(.bottom, bottomInset + (navigatorVisible && store.mainImage != nil ? 178 : 0))
         }
         .overlay(alignment: .trailing) {
             PageArrow(systemImage: "chevron.right", enabled: store.selection < store.images.count - 1) { store.move(1) }
+                .padding(.trailing, trailingInset)
+                .padding(.bottom, bottomInset)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
@@ -359,6 +419,45 @@ struct ThumbnailStrip: View {
     @State private var position = ScrollPosition()
     @State private var offsetX: CGFloat = 0
     @State private var viewWidth: CGFloat = 0
+    @State private var wheel = WheelTarget()
+
+    /// 连续滚轮时累计的目标位置(滚动位置的回报有延迟,连续几格要在上一格的目标上继续加)
+    private final class WheelTarget {
+        var x: CGFloat = 0
+        var time: TimeInterval = 0
+    }
+
+    private var maxOffset: CGFloat { max(0, contentWidth - viewWidth) }
+
+    /// 鼠标滚轮(纵向)转成横向滚动。
+    /// 和点击、拖动滚动条走同一个滚动位置,这样滚完再点照片时不会从旧位置跳一下
+    private func wheelScroll(dy: CGFloat, precise: Bool) {
+        let now = ProcessInfo.processInfo.systemUptime
+        let base = now - wheel.time < 0.15 ? wheel.x : offsetX
+        let x = min(max(base - (precise ? dy : dy * 12), 0), maxOffset)
+        wheel.x = x
+        wheel.time = now
+        position.scrollTo(x: x)
+    }
+
+    /// 选中项变化后滚动缩略图条。
+    /// 点击选中的:它本来就在眼前,只在被边缘挡住时挪到刚好露出,不重新居中(否则会跳一下)。
+    /// 键盘翻页的:居中显示。
+    private func reveal(_ index: Int, minimal: Bool) {
+        let left = 10 + CGFloat(index) * 92
+        var x: CGFloat
+        if !minimal {
+            x = left + 42 - viewWidth / 2
+        } else if left < offsetX {
+            x = left - 10
+        } else if left + 84 > offsetX + viewWidth {
+            x = left + 84 + 10 - viewWidth
+        } else {
+            return
+        }
+        x = min(max(x, 0), maxOffset)
+        withAnimation(.easeInOut(duration: 0.2)) { position.scrollTo(x: x) }
+    }
 
     /// 内容总宽度:每格 84、间距 8、两端各留 10。直接算出来,比懒加载列表的估算值准
     private var contentWidth: CGFloat {
@@ -372,6 +471,7 @@ struct ThumbnailStrip: View {
                 LazyHStack(spacing: 8) {
                     ForEach(store.images.indices, id: \.self) { index in
                         ThumbnailCell(url: store.images[index],
+                                      picked: store.picked.contains(store.images[index]),
                                       selected: store.selected.contains(index),
                                       current: index == store.selection)
                             .id(index)
@@ -401,13 +501,15 @@ struct ThumbnailStrip: View {
                 .padding(.horizontal, 10)
                 .padding(.bottom, 3)
             }
-            .background(WheelToHorizontalScroll())
+            .background(WheelCatcher(verticalOnly: true) { dy, precise, _ in
+                wheelScroll(dy: dy, precise: precise)
+            })
             // 从瀑布流切回来时,直接定位到当前照片
             .onAppear { proxy.scrollTo(store.selection, anchor: .center) }
             // 切换筛选后列表整体换了,即使选中的序号没变也要重新定位
             .onChange(of: store.listVersion) { proxy.scrollTo(store.selection, anchor: .center) }
             .onChange(of: store.selection) { _, new in
-                withAnimation { proxy.scrollTo(new, anchor: .center) }
+                reveal(new, minimal: store.selectionByClick)
             }
         }
     }
@@ -477,19 +579,137 @@ struct PhotoContextMenu: View {
         Button(targets.count > 1 ? "将 \(targets.count) 张照片移到废纸篓" : "移到废纸篓",
                role: .destructive) { store.trash(targets) }
         // 这些照片里有同名 RAW 时才出现
-        let raws = store.rawPairs(for: targets).count
-        if raws > 0 {
-            Button(targets.count > 1 ? "将 \(targets.count) 张照片连同 \(raws) 个 RAW 一起移到废纸篓"
-                                     : "连同 RAW 一起移到废纸篓",
-                   role: .destructive) { store.trash(targets, withRAW: true) }
+        // 这些照片有同名文件时才出现:看 JPG 时是带上 RAW,看 RAW 时是带上 JPG
+        let pairs = store.pairs(for: targets)
+        let pairsText = ImageStore.describe(pairs, of: store.urls(at: targets))
+        if !pairs.isEmpty {
+            Button(targets.count > 1 ? "将 \(targets.count) 张照片连同 \(pairsText) 一起移到废纸篓"
+                                     : "连同 \(pairsText) 一起移到废纸篓",
+                   role: .destructive) { store.trash(targets, withPairs: true) }
         }
         Divider()
         Button("在访达中显示") { store.revealInFinder(targets) }
     }
 }
 
+/// 被标记照片右上角的绿色对勾
+struct PickBadge: View {
+    var size: CGFloat = 18
+
+    var body: some View {
+        Image(systemName: "checkmark.circle.fill")
+            .font(.system(size: size, weight: .semibold))
+            .symbolRenderingMode(.palette)
+            .foregroundStyle(.white, .green)
+            .shadow(color: .black.opacity(0.35), radius: 2, y: 1)
+    }
+}
+
+/// 操作条上的文字按钮:可点时是清楚的前景色,鼠标移上去有底色,不可点时才变淡。
+/// (系统的无边框按钮默认是灰色文字,看起来像不能点)
+struct BarButtonStyle: ButtonStyle {
+    var color: Color = .primary
+
+    func makeBody(configuration: Configuration) -> some View { Content(configuration: configuration, color: color) }
+
+    private struct Content: View {
+        let configuration: Configuration
+        let color: Color
+        @Environment(\.isEnabled) private var isEnabled
+        @State private var hovering = false
+
+        var body: some View {
+            configuration.label
+                .fontWeight(.medium)
+                .foregroundStyle(color.opacity(isEnabled ? 1 : 0.35))
+                .padding(.horizontal, 8)
+                .padding(.vertical, 4)
+                .background(color.opacity(!isEnabled ? 0 : configuration.isPressed ? 0.22 : hovering ? 0.12 : 0),
+                            in: Capsule())
+                .contentShape(Capsule())
+                .onHover { hovering = $0 }
+                .animation(.easeOut(duration: 0.1), value: hovering)
+        }
+    }
+}
+
+/// 筛选模式的操作条:浮在照片区域顶部
+struct CullingBar: View {
+    @EnvironmentObject var store: ImageStore
+    @AppStorage("cullingIncludeRAW") private var includePairs = false
+    @State private var confirmingDelete = false
+
+    var body: some View {
+        let count = store.picked.count
+        let pairs = store.pickedPairs
+        let withPairs = includePairs && !pairs.isEmpty
+        let pairsText = ImageStore.describe(pairs, of: store.picked)
+        HStack(spacing: 6) {
+            if let transfer = store.transfer {
+                ProgressView(value: Double(transfer.done), total: Double(max(transfer.total, 1)))
+                    .frame(width: 160)
+                Text("正在\(transfer.verb) \(transfer.done) / \(transfer.total)")
+                    .monospacedDigit()
+            } else {
+                Text(count == 0 ? "按 \(ShortcutStore.displayName(ShortcutStore.shared.key(for: .togglePick))) 标记照片"
+                                : "已标记 \(count) 张")
+                    .monospacedDigit()
+                    .foregroundStyle(count == 0 ? .secondary : .primary)
+
+                Divider().frame(height: 16)
+
+                Button("全选") { store.pickAll() }
+                Button("反选") { store.invertPicks() }
+                Button("清除") { store.clearPicks() }
+                    .disabled(count == 0)
+
+                if !pairs.isEmpty {
+                    Divider().frame(height: 16)
+                    Toggle("连同 \(pairsText)", isOn: $includePairs)
+                        .toggleStyle(.checkbox)
+                        // 鼠标停在上面可以看到具体会带上哪些文件
+                        .help("复制 / 移动 / 删除时会带上这些还没标记的同名文件:\n"
+                              + pairs.map(\.lastPathComponent).sorted().prefix(12).joined(separator: "\n")
+                              + (pairs.count > 12 ? "\n…共 \(pairs.count) 个" : ""))
+                }
+
+                Divider().frame(height: 16)
+
+                Button("复制到…") { store.transferPicked(.copy, includePairs: includePairs && !pairs.isEmpty) }
+                    .disabled(count == 0)
+                Button("移动到…") { store.transferPicked(.move, includePairs: includePairs && !pairs.isEmpty) }
+                    .disabled(count == 0)
+
+                Divider().frame(height: 16)
+
+                Button("删除", role: .destructive) { confirmingDelete = true }
+                    .buttonStyle(BarButtonStyle(color: .red))
+                    .disabled(count == 0)
+                    .help("把标记的照片移到废纸篓")
+            }
+        }
+        .font(.callout)
+        .buttonStyle(BarButtonStyle())
+        .padding(.horizontal, 16)
+        .padding(.vertical, 9)
+        .glassEffect(.regular, in: .capsule)
+        // 一次删很多张,先确认一下(数量和是否带同名文件都写清楚)
+        .confirmationDialog(
+            withPairs ? "将标记的 \(count) 张照片连同 \(pairsText) 移到废纸篓?"
+                      : "将标记的 \(count) 张照片移到废纸篓?",
+            isPresented: $confirmingDelete
+        ) {
+            Button("移到废纸篓", role: .destructive) { store.trashPicked(includePairs: withPairs) }
+            Button("取消", role: .cancel) {}
+        } message: {
+            Text("可以在废纸篓里恢复。")
+        }
+    }
+}
+
 struct ThumbnailCell: View {
     let url: URL
+    var picked = false
     let selected: Bool
     /// 是否是主图正在显示的那一张
     let current: Bool
@@ -508,6 +728,9 @@ struct ThumbnailCell: View {
             .stroke(Color.accentColor.opacity(current ? 1 : 0.6), lineWidth: current ? 3 : (selected ? 2 : 0)))
         .overlay(RoundedRectangle(cornerRadius: 4)
             .fill(Color.accentColor.opacity(selected && !current ? 0.25 : 0)))
+        .overlay(alignment: .topTrailing) {
+            if picked { PickBadge(size: 16).padding(4) }
+        }
         .task(id: url) {
             // 删除后同一个格子会换成另一张图,先换成新图的缓存(没有则清空)
             image = ThumbnailCache.shared.cached(url)

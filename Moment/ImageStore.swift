@@ -23,7 +23,7 @@ struct HeroFlight: Identifiable {
 nonisolated enum WaterfallLayout {
     static let spacing: CGFloat = 6
     /// 右侧额外留给滚动条的空隙,免得滚动条压在最右一列照片上
-    static let scrollbarGutter: CGFloat = 10
+    static let scrollbarGutter: CGFloat = 14
     /// 主图四周的留白(ZoomableImage 用同一个值)
     static let viewerPadding: CGFloat = 12
 
@@ -93,7 +93,9 @@ final class ImageStore: ObservableObject {
     @Published var meta: [MetaSection] = []
     /// 缩略图条里被选中的项(多选);主图显示的是 `selection`
     @Published var selected: Set<Int> = []
+    /// 提示框:标题和内容(删除失败、复制 / 移动的结果)
     @Published var errorMessage: String?
+    @Published var alertTitle = "无法删除"
     /// 普通模式(单张 + 缩略图条)或瀑布流模式
     @Published var mode: ViewMode = .single {
         didSet {
@@ -113,6 +115,7 @@ final class ImageStore: ObservableObject {
     @Published var hero: HeroFlight?
     /// 以下三项由界面随时写入,只在切换的瞬间读取,不触发刷新
     var photoAreaSize: CGSize = .zero          // 照片显示区域(主图 / 瀑布流)当前的大小
+    var trailingInset: CGFloat = 0             // 其中右侧被信息栏盖住的宽度
     var stripExtraHeight: CGFloat = 0          // 普通模式下缩略图条占掉的高度
     var waterfallSelectionRect: CGRect?        // 选中的照片此刻在瀑布流里的位置
 
@@ -123,14 +126,11 @@ final class ImageStore: ObservableObject {
               photoAreaSize.width > 0, photoAreaSize.height > 0 else { return }
 
         // 两种模式下照片区域的大小:宽度一样,普通模式的高度要扣掉缩略图条
-        let singleSize: CGSize, waterfallSize: CGSize
-        if old == .single {
-            singleSize = photoAreaSize
-            waterfallSize = CGSize(width: photoAreaSize.width, height: photoAreaSize.height + stripExtraHeight)
-        } else {
-            waterfallSize = photoAreaSize
-            singleSize = CGSize(width: photoAreaSize.width, height: max(photoAreaSize.height - stripExtraHeight, 1))
-        }
+        // 照片区域现在始终是整块(信息栏和缩略图条都浮在它上面):
+        // 两种模式都让出右边的信息栏;普通模式还要让出底部的缩略图条,瀑布流没有缩略图条
+        let usableWidth = max(photoAreaSize.width - trailingInset, 1)
+        let waterfallSize = CGSize(width: usableWidth, height: photoAreaSize.height)
+        let singleSize = CGSize(width: usableWidth, height: max(photoAreaSize.height - stripExtraHeight, 1))
         let big = WaterfallLayout.fitRect(aspect: image.size.width / image.size.height, in: singleSize)
 
         let cell: CGRect
@@ -191,6 +191,7 @@ final class ImageStore: ObservableObject {
             let list = await Task.detached(priority: .userInitiated) { Self.scan(url) }.value
             guard !Task.isCancelled else { return }
             allImages = list
+            picked = []
             rebuildRAWIndex()
             aspectCache = [:]
             applyFilter()
@@ -245,8 +246,12 @@ final class ImageStore: ObservableObject {
             .sorted { $0.lastPathComponent.localizedStandardCompare($1.lastPathComponent) == .orderedAscending }
     }
 
+    /// 最近一次选中项变化是不是鼠标点出来的(缩略图条据此决定要不要重新居中)。不触发刷新
+    private(set) var selectionByClick = false
+
     func move(_ delta: Int) {
         guard !images.isEmpty else { return }
+        selectionByClick = false
         selection = min(max(selection + delta, 0), images.count - 1)
         selected = [selection]
         anchor = selection
@@ -255,6 +260,7 @@ final class ImageStore: ObservableObject {
     /// 点击缩略图:普通点击单选,Shift 连选一段,Command 逐个加减
     func click(_ index: Int, shift: Bool, command: Bool) {
         guard images.indices.contains(index) else { return }
+        selectionByClick = true
         if shift {
             selected = Set(min(anchor, index)...max(anchor, index))
         } else if command {
@@ -274,16 +280,15 @@ final class ImageStore: ObservableObject {
     }
 
     /// 把指定图片移到废纸篓(可在废纸篓中恢复)
-    /// - Parameter withRAW: 同时删除这些照片同名的 RAW 文件(即使当前筛选下没有显示出来)
-    func trash(_ requested: Set<Int>, withRAW: Bool = false) {
-        // 删除后序号会变,攒着的尺寸是按序号记的,先用上
-        flushPendingAspects()
+    /// - Parameter withPairs: 同时删除这些照片的同名文件(JPG 对应的 RAW,或 RAW 对应的 JPG),
+    ///   即使当前筛选下没有显示出来
+    func trash(_ requested: Set<Int>, withPairs: Bool = false) {
         var indices = requested
-        // 同名 RAW:显示在当前列表里的按下标一起删;没显示出来的(比如只看 JPG 时)单独删
+        // 同名文件:显示在当前列表里的按下标一起删;没显示出来的(比如只看 JPG 时的 RAW)单独删
         var hiddenRAWs: [URL] = []
-        if withRAW {
+        if withPairs {
             let position = Dictionary(uniqueKeysWithValues: images.enumerated().map { ($0.element, $0.offset) })
-            for raw in rawPairs(for: requested) {
+            for raw in pairs(for: requested) {
                 if let i = position[raw] { indices.insert(i) } else { hiddenRAWs.append(raw) }
             }
         }
@@ -308,21 +313,27 @@ final class ImageStore: ObservableObject {
             }
         }
         if !failures.isEmpty {
+            alertTitle = "无法删除"
             errorMessage = "有 \(failures.count) 个文件未能移到废纸篓:\n" + failures.prefix(5).joined(separator: "\n")
         }
-        if !removedHidden.isEmpty {
-            allImages.removeAll { removedHidden.contains($0) }
-            for url in removedHidden { aspectCache[url] = nil }
-            if removed.isEmpty { rebuildRAWIndex() }
-        }
+        dropFromLists(Set(removed.map { images[$0] }).union(removedHidden))
+    }
+
+    /// 这些文件已经不在文件夹里了(删除或移走):从各个列表里去掉,并停在原位置附近
+    private func dropFromLists(_ urls: Set<URL>) {
+        guard !urls.isEmpty else { return }
+        // 序号会变,攒着的尺寸是按序号记的,先用上
+        flushPendingAspects()
+        let removed = Set(images.indices.filter { urls.contains(images[$0]) })
+        allImages.removeAll { urls.contains($0) }
+        picked.subtract(urls)
+        rebuildRAWIndex()
         guard !removed.isEmpty else { return }
 
-        // 删除后停在原位置附近:当前项前面删掉了几个,就往前挪几个
+        // 当前项前面去掉了几个,就往前挪几个
         let shift = removed.filter { $0 < selection }.count
-        let removedURLs = Set(removed.map { images[$0] })
-        allImages.removeAll { removedURLs.contains($0) }
-        rebuildRAWIndex()
         aspectTask?.cancel()
+        aspectTask = nil
         aspects = aspects.enumerated().filter { !removed.contains($0.offset) }.map(\.element)
         aspectKnown = aspectKnown.enumerated().filter { !removed.contains($0.offset) }.map(\.element)
         aspectsLoaded = aspectKnown.count { $0 }
@@ -334,25 +345,196 @@ final class ImageStore: ObservableObject {
         loadAspects()   // 继续读还没读到的
     }
 
-    // MARK: 同名 RAW
+    // MARK: 筛选模式(挑片)
 
-    /// 文件名(不含扩展名、不分大小写)→ 这个名字的 RAW 文件
-    private var rawByStem: [String: [URL]] = [:]
+    /// 筛选模式开关:开着时可以用快捷键标记照片,并显示操作条
+    @Published var culling = false
+    /// 被标记(挑中)的照片。按文件记,切换 JPG / RAW 筛选或模式后仍然保留
+    @Published private(set) var picked: Set<URL> = []
+    /// 正在复制 / 移动时的进度
+    @Published private(set) var transfer: TransferProgress?
+
+    struct TransferProgress {
+        let verb: String
+        var done: Int
+        let total: Int
+    }
+
+    enum TransferKind {
+        case copy, move
+        var verb: String { self == .copy ? "复制" : "移动" }
+    }
+
+    /// 当前列表里被标记的张数
+    var pickedCountInList: Int { images.count { picked.contains($0) } }
+
+    /// 标记 / 取消标记:多选了几张就作用于这几张,否则作用于当前这张。
+    /// 这几张已经全部标记时是取消,否则是全部标记
+    func togglePick() {
+        let targets = (selected.count > 1 ? selected : [selection])
+            .filter { images.indices.contains($0) }.map { images[$0] }
+        guard !targets.isEmpty else { return }
+        if targets.allSatisfy(picked.contains) { picked.subtract(targets) } else { picked.formUnion(targets) }
+    }
+
+    /// 全选:标记当前列表里的所有照片
+    func pickAll() { picked.formUnion(images) }
+
+    /// 反选:当前列表里标记的取消、没标记的标记(不在当前列表里的不动)
+    func invertPicks() { picked.formSymmetricDifference(images) }
+
+    func clearPicks() { picked = [] }
+
+    /// 标记的照片还有哪些没被标记的同名文件(标记 JPG 时是 RAW,标记 RAW 时是 JPG)
+    var pickedPairs: [URL] { siblings(of: picked) }
+
+    /// 把标记的照片移到废纸篓(可以在废纸篓里恢复)
+    func trashPicked(includePairs: Bool) {
+        guard transfer == nil, !picked.isEmpty else { return }
+        var wanted = picked
+        if includePairs { wanted.formUnion(pickedPairs) }
+        let sources = allImages.filter(wanted.contains)
+        guard !sources.isEmpty else { return }
+
+        transfer = TransferProgress(verb: "删除", done: 0, total: sources.count)
+        Task {
+            var succeeded: Set<URL> = []
+            var failures: [String] = []
+            for source in sources {
+                let error = await Task.detached(priority: .userInitiated) { () -> Error? in
+                    do { try FileManager.default.trashItem(at: source, resultingItemURL: nil); return nil }
+                    catch { return error }
+                }.value
+                if let error { failures.append("\(source.lastPathComponent):\(error.localizedDescription)") }
+                else { succeeded.insert(source) }
+                transfer?.done += 1
+            }
+            transfer = nil
+            dropFromLists(succeeded)
+            // 全部成功就不打扰;有没删掉的才提示
+            if !failures.isEmpty {
+                alertTitle = "删除未全部完成"
+                errorMessage = "已将 \(succeeded.count) 个文件移到废纸篓。\n\n\(failures.count) 个失败:\n"
+                    + failures.prefix(5).joined(separator: "\n")
+            }
+        }
+    }
+
+    /// 把标记的照片复制或移动到用户选择的文件夹
+    func transferPicked(_ kind: TransferKind, includePairs: Bool) {
+        #if os(macOS)
+        guard transfer == nil, !picked.isEmpty else { return }
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.canCreateDirectories = true
+        panel.allowsMultipleSelection = false
+        panel.prompt = "\(kind.verb)到这里"
+        panel.message = "选择要\(kind.verb)到的文件夹"
+        guard panel.runModal() == .OK, let destination = panel.url else { return }
+        if destination.standardizedFileURL == folder?.standardizedFileURL {
+            alertTitle = "无法\(kind.verb)"
+            errorMessage = "目标文件夹就是当前打开的文件夹,请选择另一个文件夹。"
+            return
+        }
+
+        // 按文件夹里的顺序处理;需要时带上同名 RAW
+        var wanted = picked
+        if includePairs { wanted.formUnion(pickedPairs) }
+        let sources = allImages.filter(wanted.contains)
+        guard !sources.isEmpty else { return }
+
+        transfer = TransferProgress(verb: kind.verb, done: 0, total: sources.count)
+        Task {
+            var succeeded: Set<URL> = []
+            var skipped: [String] = []
+            var failures: [String] = []
+            for source in sources {
+                let target = destination.appendingPathComponent(source.lastPathComponent)
+                // 文件读写放到后台线程,从 SD 卡拷大文件时界面不会卡住
+                let copying = kind == .copy
+                let result = await Task.detached(priority: .userInitiated) { () -> Result<Bool, Error> in
+                    // 目标位置已有同名文件:跳过,绝不覆盖
+                    if FileManager.default.fileExists(atPath: target.path) { return .success(false) }
+                    do {
+                        if copying { try FileManager.default.copyItem(at: source, to: target) }
+                        else { try FileManager.default.moveItem(at: source, to: target) }
+                        return .success(true)
+                    } catch {
+                        return .failure(error)
+                    }
+                }.value
+                switch result {
+                case .success(true): succeeded.insert(source)
+                case .success(false): skipped.append(source.lastPathComponent)
+                case .failure(let error): failures.append("\(source.lastPathComponent):\(error.localizedDescription)")
+                }
+                transfer?.done += 1
+            }
+            transfer = nil
+            // 移走的文件已经不在这个文件夹里了
+            if kind == .move { dropFromLists(succeeded) }
+
+            var lines = ["已\(kind.verb) \(succeeded.count) 个文件到「\(destination.lastPathComponent)」。"]
+            if !skipped.isEmpty {
+                lines.append("\(skipped.count) 个因目标文件夹里已有同名文件而跳过:\n" + skipped.prefix(5).joined(separator: "\n"))
+            }
+            if !failures.isEmpty {
+                lines.append("\(failures.count) 个失败:\n" + failures.prefix(5).joined(separator: "\n"))
+            }
+            alertTitle = failures.isEmpty ? "\(kind.verb)完成" : "\(kind.verb)未全部完成"
+            errorMessage = lines.joined(separator: "\n\n")
+        }
+        #endif
+    }
+
+    // MARK: 同名文件(RAW + JPG 成对拍摄)
+
+    /// 文件名(不含扩展名、不分大小写)→ 叫这个名字的所有文件
+    private var filesByStem: [String: [URL]] = [:]
 
     private static func stem(_ url: URL) -> String {
         url.deletingPathExtension().lastPathComponent.lowercased()
     }
 
     private func rebuildRAWIndex() {
-        rawByStem = Dictionary(grouping: allImages.filter(ImageMeta.isRAW), by: Self.stem)
+        filesByStem = Dictionary(grouping: allImages, by: Self.stem)
     }
 
-    /// 这些照片各自同名的 RAW 文件(照片本身是 RAW 的不算)
-    func rawPairs(for indices: Set<Int>) -> [URL] {
-        indices.sorted().flatMap { i -> [URL] in
-            guard images.indices.contains(i), !ImageMeta.isRAW(images[i]) else { return [] }
-            return rawByStem[Self.stem(images[i])] ?? []
+    /// 这些文件的同名文件(不含它们自己)。看 JPG 时得到的是 RAW,看 RAW 时得到的是 JPG
+    private func siblings(of urls: Set<URL>) -> [URL] {
+        var seen = urls
+        var result: [URL] = []
+        for url in urls {
+            for other in filesByStem[Self.stem(url)] ?? [] where seen.insert(other).inserted {
+                result.append(other)
+            }
         }
+        return result
+    }
+
+    /// 这些照片的同名文件(即使当前筛选下没有显示出来)
+    func pairs(for indices: Set<Int>) -> [URL] {
+        siblings(of: Set(indices.filter { images.indices.contains($0) }.map { images[$0] }))
+    }
+
+    /// 一组同名文件该怎么称呼。
+    /// 只有在情况很单纯时才说具体格式:选的全是 JPG、带上的全是 RAW → "3 个 RAW";反过来 → "3 个 JPG"。
+    /// 选的照片本身就混着 RAW 和 JPG,或者带上的文件混着几种格式,都叫"3 个同名文件"。
+    static func describe(_ pairs: [URL], of sources: some Collection<URL>) -> String {
+        func isJPG(_ url: URL) -> Bool { ["jpg", "jpeg"].contains(url.pathExtension.lowercased()) }
+        let sourcesAllRAW = sources.allSatisfy(ImageMeta.isRAW)
+        let sourcesNoRAW = !sources.contains(where: ImageMeta.isRAW)
+        let kind: String
+        if sourcesNoRAW, pairs.allSatisfy(ImageMeta.isRAW) { kind = "RAW" }
+        else if sourcesAllRAW, pairs.allSatisfy(isJPG) { kind = "JPG" }
+        else { kind = "同名文件" }
+        return "\(pairs.count) 个\(kind == "同名文件" ? "" : " ")\(kind)"
+    }
+
+    /// 序号对应的文件
+    func urls(at indices: Set<Int>) -> [URL] {
+        indices.sorted().filter { images.indices.contains($0) }.map { images[$0] }
     }
 
     func revealInFinder(_ indices: Set<Int>) {
@@ -436,7 +618,7 @@ final class ImageStore: ObservableObject {
                 let batch = nextAspectBatch(64)
                 if batch.isEmpty { break }
                 let chunk = batch.map { images[$0] }
-                let values = await Task.detached(priority: .userInitiated) { ImageMeta.aspects(chunk) }.value
+                let values = await Task.detached(priority: .utility) { ImageMeta.aspects(chunk) }.value
                 guard !Task.isCancelled else { return }
                 var updated = aspects
                 var newlyKnown = 0
@@ -671,9 +853,14 @@ nonisolated enum ImageMeta {
         var out = [CGFloat](repeating: 1.5, count: urls.count)
         out.withUnsafeMutableBufferPointer { buf in
             nonisolated(unsafe) let base = buf.baseAddress
-            DispatchQueue.concurrentPerform(iterations: urls.count) { i in
-                // 每个文件单独释放临时对象,否则一整批读完之前都不会释放
-                autoreleasepool { base?[i] = aspect(urls[i]) }
+            // 只用两路并行:读尺寸是给排版用的后台工作,不能把存储卡的读取能力占满,
+            // 否则屏幕上正等着的缩略图反而读不出来(RAW 文件尤其明显)
+            let lanes = 2
+            DispatchQueue.concurrentPerform(iterations: lanes) { lane in
+                for i in stride(from: lane, to: urls.count, by: lanes) {
+                    // 每个文件单独释放临时对象,否则一整批读完之前都不会释放
+                    autoreleasepool { base?[i] = aspect(urls[i]) }
+                }
             }
         }
         return out
@@ -691,6 +878,17 @@ nonisolated enum ImageMeta {
         ]
         guard let thumb = CGImageSourceCreateThumbnailAtIndex(src, 0, opts as CFDictionary) else { return nil }
         return preferEmbedded ? cropToTrueAspect(thumb, source: src) : thumb
+    }
+
+    /// 瀑布流用的清晰缩略图。
+    /// RAW 文件里一般带着一张相机生成的 JPG 预览,够大就直接用它:
+    /// 完整解码一张 RAW 要一两秒,而且开始了就停不下来,滚动时会把加载队列堵住。
+    static func gridThumbnail(_ url: URL, maxPixel: Int) -> CGImage? {
+        if isRAW(url), let preview = thumbnail(url, maxPixel: maxPixel, preferEmbedded: true),
+           CGFloat(max(preview.width, preview.height)) >= CGFloat(maxPixel) * 0.6 {
+            return preview
+        }
+        return thumbnail(url, maxPixel: maxPixel)
     }
 
     /// 相机内嵌的缩略图常是固定 4:3,照片不是 4:3 时会被补上黑边。
@@ -743,7 +941,9 @@ final class ThumbnailCache {
         c.totalCostLimit = 256 * 1024 * 1024   // 约 256 MB 像素数据
         return c
     }()
-    private let limiter = Limiter(max: max(4, ProcessInfo.processInfo.activeProcessorCount - 2))
+    /// 同时最多读几张。已经开始读的停不下来,所以不能太多:
+    /// 太多的话滚到新位置后,要等一大批旧位置的图读完才轮到眼前的
+    private let limiter = Limiter(max: max(3, min(6, ProcessInfo.processInfo.activeProcessorCount - 2)))
 
     private func key(_ url: URL, _ size: Int) -> NSString { "\(size)|\(url.path)" as NSString }
 
@@ -770,7 +970,10 @@ final class ThumbnailCache {
         if Task.isCancelled { await limiter.release(); return nil }
         let embedded = size <= Self.stripSize
         let cg = await Task.detached(priority: .medium) {
-            autoreleasepool { ImageMeta.thumbnail(url, maxPixel: size, preferEmbedded: embedded) }
+            autoreleasepool {
+                embedded ? ImageMeta.thumbnail(url, maxPixel: size, preferEmbedded: true)
+                         : ImageMeta.gridThumbnail(url, maxPixel: size)
+            }
         }.value
         await limiter.release()
         guard let cg else { return nil }
