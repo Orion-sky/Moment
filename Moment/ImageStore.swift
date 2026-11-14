@@ -27,10 +27,11 @@ nonisolated enum WaterfallLayout {
     /// 主图四周的留白(ZoomableImage 用同一个值)
     static let viewerPadding: CGFloat = 12
 
-    static func make(_ aspects: [CGFloat], width: CGFloat, columns: Int) -> (frames: [CGRect], height: CGFloat) {
+    /// - Parameter topInset: 内容顶部留出的高度(工具栏)。第一排照片从它下面开始,滚动后会滚到工具栏后面
+    static func make(_ aspects: [CGFloat], width: CGFloat, columns: Int, topInset: CGFloat = 0) -> (frames: [CGRect], height: CGFloat) {
         let count = min(max(columns, 1), 20)
         let colWidth = max(1, (width - scrollbarGutter - spacing * CGFloat(count + 1)) / CGFloat(count))
-        var heights = [CGFloat](repeating: spacing, count: count)
+        var heights = [CGFloat](repeating: topInset + spacing, count: count)
         var frames: [CGRect] = []
         frames.reserveCapacity(aspects.count)
         for aspect in aspects {
@@ -44,9 +45,11 @@ nonisolated enum WaterfallLayout {
     }
 
     /// 让第 index 张居中时的滚动位置
-    static func centeredOffset(_ layout: (frames: [CGRect], height: CGFloat), index: Int, viewHeight: CGFloat) -> CGFloat {
+    static func centeredOffset(_ layout: (frames: [CGRect], height: CGFloat), index: Int,
+                               viewHeight: CGFloat, topInset: CGFloat = 0) -> CGFloat {
         guard layout.frames.indices.contains(index) else { return 0 }
-        let y = layout.frames[index].midY - viewHeight / 2
+        // 在没被工具栏挡住的那部分里居中
+        let y = layout.frames[index].midY - (viewHeight + topInset) / 2
         return min(max(y, 0), max(0, layout.height - viewHeight))
     }
 
@@ -116,6 +119,7 @@ final class ImageStore: ObservableObject {
     /// 以下三项由界面随时写入,只在切换的瞬间读取,不触发刷新
     var photoAreaSize: CGSize = .zero          // 照片显示区域(主图 / 瀑布流)当前的大小
     var trailingInset: CGFloat = 0             // 其中右侧被信息栏盖住的宽度
+    var topInset: CGFloat = 0                  // 其中顶部被工具栏盖住的高度
     var stripExtraHeight: CGFloat = 0          // 普通模式下缩略图条占掉的高度
     var waterfallSelectionRect: CGRect?        // 选中的照片此刻在瀑布流里的位置
 
@@ -128,10 +132,14 @@ final class ImageStore: ObservableObject {
         // 两种模式下照片区域的大小:宽度一样,普通模式的高度要扣掉缩略图条
         // 照片区域现在始终是整块(信息栏和缩略图条都浮在它上面):
         // 两种模式都让出右边的信息栏;普通模式还要让出底部的缩略图条,瀑布流没有缩略图条
+        // 顶部还要让出工具栏:两种模式下照片都从工具栏下方开始排
         let usableWidth = max(photoAreaSize.width - trailingInset, 1)
+        let usableHeight = max(photoAreaSize.height - topInset, 1)
+        // 瀑布流的滚动区域是整块高度(照片会滚到工具栏后面),工具栏的高度算在内容顶部的留白里
         let waterfallSize = CGSize(width: usableWidth, height: photoAreaSize.height)
-        let singleSize = CGSize(width: usableWidth, height: max(photoAreaSize.height - stripExtraHeight, 1))
+        let singleSize = CGSize(width: usableWidth, height: max(usableHeight - stripExtraHeight, 1))
         let big = WaterfallLayout.fitRect(aspect: image.size.width / image.size.height, in: singleSize)
+            .offsetBy(dx: 0, dy: topInset)
 
         let cell: CGRect
         if old == .waterfall {
@@ -140,8 +148,10 @@ final class ImageStore: ObservableObject {
         } else {
             // 瀑布流还没创建:它进入时会把选中的照片居中,按同样的算法算出格子位置
             let saved = UserDefaults.standard.integer(forKey: "waterfallColumns")
-            let layout = WaterfallLayout.make(aspects, width: waterfallSize.width, columns: saved == 0 ? 5 : saved)
-            let y = WaterfallLayout.centeredOffset(layout, index: selection, viewHeight: waterfallSize.height)
+            let layout = WaterfallLayout.make(aspects, width: waterfallSize.width,
+                                              columns: saved == 0 ? 5 : saved, topInset: topInset)
+            let y = WaterfallLayout.centeredOffset(layout, index: selection,
+                                                   viewHeight: waterfallSize.height, topInset: topInset)
             cell = layout.frames[selection].offsetBy(dx: 0, dy: -y)
         }
         hero = old == .single ? HeroFlight(image: image, from: big, to: cell, endsInCell: true)

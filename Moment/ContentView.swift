@@ -48,7 +48,9 @@ struct ContentView: View {
         return true
     }
 
-    var body: some View {
+    /// 窗口内容。铺满整个窗口,包括工具栏后面;topInset 是工具栏占的高度
+    @ViewBuilder private func content(topInset: CGFloat) -> some View {
+        let _ = (store.topInset = topInset)
         // 缩略图条(116)加上下留白(8 + 8)在普通模式下盖住的高度,衔接动画要用
         let _ = (store.stripExtraHeight = showStrip ? 132 : 0)
         // 信息栏浮在照片区域上面,这是它盖住的宽度(面板 280 + 右边留白 8)
@@ -63,12 +65,12 @@ struct ContentView: View {
                     Color(nsColor: .underPageBackgroundColor)
                     if store.mode == .waterfall && hasImages {
                         // 瀑布流不能被信息栏挡住,让出右边
-                        WaterfallView()
+                        WaterfallView(topInset: topInset)
                             .padding(.trailing, infoInset)
                             .transition(.opacity)
                     } else {
                         // 离开时立即移除:飞行中的那张会在同一位置接上
-                        ViewerArea(trailingInset: infoInset, bottomInset: stripInset)
+                        ViewerArea(trailingInset: infoInset, bottomInset: stripInset, topInset: topInset)
                             .transition(.asymmetric(insertion: .opacity, removal: .identity))
                     }
                 }
@@ -87,7 +89,7 @@ struct ContentView: View {
                 .overlay(alignment: .top) {
                     if store.culling && hasImages {
                         CullingBar()
-                            .padding(.top, 10)
+                            .padding(.top, 10 + topInset)
                             .padding(.trailing, infoInset)
                             .transition(.move(edge: .top).combined(with: .opacity))
                     }
@@ -100,7 +102,9 @@ struct ContentView: View {
                         .frame(width: 280)
                         .clipShape(.rect(cornerRadius: panelRadius))
                         .glassEffect(.regular, in: .rect(cornerRadius: panelRadius))
-                        .padding([.top, .trailing], 8)
+                        .padding(.trailing, 8)
+                        // 上面停在工具栏下方
+                        .padding(.top, topInset > 0 ? topInset + 2 : 8)
                         // 缩略图条在的时候,信息栏停在它上方,两块面板不重叠
                         .padding(.bottom, stripInset > 0 ? stripInset : 8)
                         .frame(maxWidth: .infinity, alignment: .trailing)
@@ -120,6 +124,17 @@ struct ContentView: View {
         }
         // 照片区域和玻璃面板共用同一块底色,面板才像是浮在上面
         .background(Color(nsColor: .underPageBackgroundColor))
+    }
+
+    var body: some View {
+        GeometryReader { proxy in
+            // 沉浸式:内容延伸到工具栏后面。先量出工具栏的高度,
+            // 适应窗口时照片避开它,放大后可以延伸到它下面
+            content(topInset: proxy.safeAreaInsets.top)
+                .ignoresSafeArea(.container, edges: .top)
+        }
+        // 工具栏不要自己的底色,只留浮着的玻璃按钮
+        .toolbarBackgroundVisibility(.hidden, for: .windowToolbar)
         .animation(.easeInOut(duration: 0.2), value: hasImages)
         .animation(.easeInOut(duration: 0.2), value: showInfo)
         .animation(.easeInOut(duration: 0.28), value: store.mode)
@@ -276,6 +291,8 @@ struct ViewerArea: View {
     /// 右侧被信息栏盖住的宽度、底部被缩略图条盖住的高度
     var trailingInset: CGFloat = 0
     var bottomInset: CGFloat = 0
+    /// 顶部被工具栏盖住的高度
+    var topInset: CGFloat = 0
     /// 放大时左下角有导航小图
     @State private var navigatorVisible = false
 
@@ -283,7 +300,7 @@ struct ViewerArea: View {
         ZStack {
             Color(nsColor: .underPageBackgroundColor)
             if let image = store.mainImage {
-                ZoomableImage(image: image, trailingInset: trailingInset, bottomInset: bottomInset,
+                ZoomableImage(image: image, trailingInset: trailingInset, bottomInset: bottomInset, topInset: topInset,
                               navigatorVisible: $navigatorVisible)
                     .id(store.current)
                     // 衔接动画进行时由飞行中的那张代替,结束后原位出现
@@ -318,6 +335,7 @@ struct ViewerArea: View {
                     .padding(.horizontal, 10).padding(.vertical, 6)
                     .glassEffect(.regular.tint(.green.opacity(0.5)), in: .capsule)
                     .padding(14)
+                    .padding(.top, topInset)
             }
         }
         .overlay(alignment: .leading) {
@@ -325,11 +343,13 @@ struct ViewerArea: View {
             // 小图显示时,热区让出下面这一段(小图最高 150,加上下留白)
             PageArrow(systemImage: "chevron.left", enabled: store.selection > 0) { store.move(-1) }
                 .padding(.bottom, bottomInset + (navigatorVisible && store.mainImage != nil ? 178 : 0))
+                .padding(.top, topInset)
         }
         .overlay(alignment: .trailing) {
             PageArrow(systemImage: "chevron.right", enabled: store.selection < store.images.count - 1) { store.move(1) }
                 .padding(.trailing, trailingInset)
                 .padding(.bottom, bottomInset)
+                .padding(.top, topInset)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }

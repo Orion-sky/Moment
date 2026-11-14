@@ -8,6 +8,8 @@ import AppKit
 /// 每张图的位置由宽高比直接算出,只渲染屏幕附近的格子,
 /// 所以无论有多少照片、滚到多远,进入和定位都是直接跳转。
 struct WaterfallView: View {
+    /// 顶部被工具栏盖住的高度。瀑布流铺满整块区域,第一排从工具栏下方开始,滚动时照片滚到工具栏后面
+    var topInset: CGFloat = 0
     @EnvironmentObject var store: ImageStore
     @Environment(\.displayScale) private var displayScale
     private let spacing = WaterfallLayout.spacing
@@ -33,7 +35,7 @@ struct WaterfallView: View {
                 let _ = (scroll.frames = layout.frames)
                 // 排版由这三项决定:宽度(开关信息栏、缩放窗口)、已读到的尺寸、每行张数
                 let layoutKey = LayoutKey(width: geo.size.width, loaded: store.aspectsLoaded,
-                                          columns: columnCount, list: store.listVersion)
+                                          columns: columnCount, list: store.listVersion, top: topInset)
                 let viewHeight = geo.size.height
                 // 第一次渲染时还没滚动到位:直接按选中照片所在的位置算可见范围,
                 // 这样最先创建、最先开始加载的就是选中照片周围的格子,而不是最顶上的
@@ -133,6 +135,8 @@ struct WaterfallView: View {
                         position.scrollTo(y: y)
                     }
                     .padding(.vertical, 6)
+                    // 滚动条本身不伸到工具栏后面
+                    .padding(.top, topInset)
                     // 离右边(信息栏)留一点距离;左边和照片的距离由 scrollbarGutter 保证
                     .padding(.trailing, 6)
                 }
@@ -159,7 +163,7 @@ struct WaterfallView: View {
     /// 更新加载的关注点:选中的照片在屏幕内时是它(先出它,再向外扩散),
     /// 否则是屏幕中心(滚到哪就先加载哪)
     private func updateFocus(_ frames: [CGRect], offset: CGFloat, viewHeight: CGFloat, width: CGFloat) {
-        var focus = CGPoint(x: width / 2, y: offset + viewHeight / 2)
+        var focus = CGPoint(x: width / 2, y: offset + (viewHeight + topInset) / 2)
         if frames.indices.contains(store.selection) {
             let f = frames[store.selection]
             if f.maxY > offset, f.minY < offset + viewHeight { focus = CGPoint(x: f.midX, y: f.midY) }
@@ -221,7 +225,7 @@ struct WaterfallView: View {
     }
 
     private func makeLayout(_ aspects: [CGFloat], width: CGFloat) -> (frames: [CGRect], height: CGFloat) {
-        WaterfallLayout.make(aspects, width: width, columns: columnCount)
+        WaterfallLayout.make(aspects, width: width, columns: columnCount, topInset: topInset)
     }
 
     /// 把选中照片此刻在屏幕上的位置告诉 store,切回普通模式时衔接动画从这里起飞
@@ -232,7 +236,7 @@ struct WaterfallView: View {
 
     /// 让选中的照片居中时的滚动位置
     private func centeredOffset(_ layout: (frames: [CGRect], height: CGFloat), viewHeight: CGFloat) -> CGFloat {
-        WaterfallLayout.centeredOffset(layout, index: store.selection, viewHeight: viewHeight)
+        WaterfallLayout.centeredOffset(layout, index: store.selection, viewHeight: viewHeight, topInset: topInset)
     }
 
     /// 让当前选中的照片可见。center: 居中(进入时);否则只在它不在屏幕内时做最小滚动
@@ -241,9 +245,11 @@ struct WaterfallView: View {
         let f = layout.frames[store.selection]
         var y: CGFloat
         if center {
-            y = f.midY - viewHeight / 2
-        } else if f.minY < scroll.y {
-            y = f.minY - spacing
+            // 在没被工具栏挡住的那部分里居中
+            y = f.midY - (viewHeight + topInset) / 2
+        } else if f.minY < scroll.y + topInset {
+            // 被工具栏挡住也算"不在屏幕内":滚到刚好从工具栏下面露出来
+            y = f.minY - spacing - topInset
         } else if f.maxY > scroll.y + viewHeight {
             y = f.maxY - viewHeight + spacing
         } else {
@@ -314,6 +320,7 @@ private struct LayoutKey: Hashable {
     let loaded: Int
     let columns: Int
     let list: Int
+    var top: CGFloat = 0
 }
 
 struct WaterfallCell: View {

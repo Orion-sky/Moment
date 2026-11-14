@@ -10,6 +10,8 @@ struct ZoomableImage: View {
     var trailingInset: CGFloat = 0
     /// 底部被浮动的缩略图条盖住的高度,同样处理
     var bottomInset: CGFloat = 0
+    /// 顶部被工具栏盖住的高度,同样处理
+    var topInset: CGFloat = 0
     /// 导航小图是否正在显示(告诉外面,让别的可点区域给它让位)
     var navigatorVisible: Binding<Bool> = .constant(false)
     private let padding = WaterfallLayout.viewerPadding
@@ -33,7 +35,7 @@ struct ZoomableImage: View {
         GeometryReader { geo in
             // 照片"适应窗口"时所在的区域:整个区域去掉右边被信息栏、底部被缩略图条盖住的部分
             let fit = CGSize(width: max(geo.size.width - trailingInset, 1),
-                             height: max(geo.size.height - bottomInset, 1))
+                             height: max(geo.size.height - bottomInset - topInset, 1))
             Image(nsImage: image)
                 .resizable()
                 .scaledToFit()
@@ -72,7 +74,9 @@ struct ZoomableImage: View {
                 })
                 // 放大后超出"适应区域"的部分不在这里裁掉,而是铺满整个区域再裁:
                 // 这样右边、下边超出的部分会延伸到半透明的信息栏和缩略图条下面
-                .frame(width: geo.size.width, height: geo.size.height, alignment: .topLeading)
+                .frame(width: geo.size.width, height: max(geo.size.height - topInset, 1), alignment: .topLeading)
+                // 再往上让出工具栏的高度:适应区域从工具栏下方开始,放大后向上超出的部分延伸到工具栏后面
+                .frame(width: geo.size.width, height: geo.size.height, alignment: .bottom)
                 .clipped()
                 // 放大后在左下角显示导航小图:整张照片加一个框,框住的是当前看到的部分
                 .overlay(alignment: .bottomLeading) {
