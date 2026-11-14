@@ -41,6 +41,9 @@ struct ContentView: View {
             guard hasImages else { return false }
             if !store.culling { store.culling = true }
             store.togglePick()
+        case .toggleFullScreen:
+            guard let window = NSApp.keyWindow else { return false }
+            window.toggleFullScreen(nil)
         case .zoomIn: store.zoomRequests.send(1.25)
         case .zoomOut: store.zoomRequests.send(0.8)
         case .zoomReset: store.zoomRequests.send(0)
@@ -135,6 +138,8 @@ struct ContentView: View {
         }
         // 工具栏不要自己的底色,只留浮着的玻璃按钮
         .toolbarBackgroundVisibility(.hidden, for: .windowToolbar)
+        // 全屏时工具栏没法做成透明的,改为自动隐藏,照片铺满整个屏幕
+        .background(FullScreenToolbarAutoHide())
         .animation(.easeInOut(duration: 0.2), value: hasImages)
         .animation(.easeInOut(duration: 0.2), value: showInfo)
         .animation(.easeInOut(duration: 0.28), value: store.mode)

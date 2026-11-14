@@ -4,7 +4,7 @@ import Combine
 /// 可以自定义按键的操作
 enum ShortcutAction: String, CaseIterable, Identifiable {
     case previous, next, toggleMode, toggleInfo, toggleStrip, zoomIn, zoomOut, zoomReset
-    case toggleCulling, togglePick
+    case toggleCulling, togglePick, toggleFullScreen
     var id: Self { self }
 
     var title: String {
@@ -19,6 +19,7 @@ enum ShortcutAction: String, CaseIterable, Identifiable {
         case .zoomReset: "适应窗口"
         case .toggleCulling: "开关筛选模式"
         case .togglePick: "标记 / 取消标记照片(自动进入筛选模式)"
+        case .toggleFullScreen: "进入 / 退出全屏"
         }
     }
 
@@ -34,6 +35,7 @@ enum ShortcutAction: String, CaseIterable, Identifiable {
         case .zoomReset: "0"
         case .toggleCulling: "c"
         case .togglePick: " "
+        case .toggleFullScreen: "f"
         }
     }
 
