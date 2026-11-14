@@ -11,7 +11,7 @@
     ],
   },
   "files": [
-    { "kind": "folder", "path": "pic_view", "target-membership": [ "pic_view" ] },
+    { "kind": "folder", "path": "Moment", "target-membership": [ "Moment" ] },
     {
       "kind": "group",
       "name": "Products",
@@ -22,7 +22,7 @@
   ],
   "targets": [
     {
-      "name": "pic_view",
+      "name": "Moment",
       "id": "000000000000000100000000",
       "product": "Products/Moment.app",
       "product-type": "application",
@@ -52,7 +52,7 @@
         "LD_RUNPATH_SEARCH_PATHS": "@executable_path/Frameworks",
         "LD_RUNPATH_SEARCH_PATHS[sdk=macosx*]": "@executable_path/../Frameworks",
         "MARKETING_VERSION": "1.0",
-        "PRODUCT_BUNDLE_IDENTIFIER": "devplaceholder.$(PROJECT_UNIQUE_VALUE:identifier).pic-view",
+        "PRODUCT_BUNDLE_IDENTIFIER": "devplaceholder.$(PROJECT_UNIQUE_VALUE:identifier).moment",
         "PRODUCT_NAME": "Moment",
         "REGISTER_APP_GROUPS": "YES",
         "SDKROOT": "auto",

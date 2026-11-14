@@ -12,10 +12,11 @@ struct ContentView: View {
 
     /// 打开文件夹并扫描到图片后,才显示参数面板和缩略图条
     private var hasImages: Bool { !store.images.isEmpty }
+    private let panelRadius: CGFloat = 16
 
     var body: some View {
-        // 缩略图条(120)加分隔线(1)在普通模式下占掉的高度,衔接动画要用
-        let _ = (store.stripExtraHeight = showStrip ? 121 : 0)
+        // 缩略图条(116)加上下留白(8 + 8)在普通模式下占掉的高度,衔接动画要用
+        let _ = (store.stripExtraHeight = showStrip ? 132 : 0)
         VStack(spacing: 0) {
             HStack(spacing: 0) {
                 ZStack {
@@ -44,19 +45,26 @@ struct ContentView: View {
                 .clipped()
                 .onGeometryChange(for: CGSize.self) { $0.size } action: { store.photoAreaSize = $0 }
                 if hasImages && showInfo {
-                    Divider()
+                    // 液态玻璃:信息栏是浮在背景上的一块圆角玻璃面板
                     InfoPanel()
                         .frame(width: 280)
-                        .transition(.move(edge: .trailing))
+                        .clipShape(.rect(cornerRadius: panelRadius))
+                        .glassEffect(.regular, in: .rect(cornerRadius: panelRadius))
+                        .padding([.top, .bottom, .trailing], 8)
+                        .transition(.move(edge: .trailing).combined(with: .opacity))
                 }
             }
             if hasImages && showStrip && store.mode == .single {
-                Divider()
                 ThumbnailStrip()
-                    .frame(height: 120)
-                    .transition(.move(edge: .bottom))
+                    .frame(height: 116)
+                    .clipShape(.rect(cornerRadius: panelRadius))
+                    .glassEffect(.regular, in: .rect(cornerRadius: panelRadius))
+                    .padding(8)
+                    .transition(.move(edge: .bottom).combined(with: .opacity))
             }
         }
+        // 照片区域和玻璃面板共用同一块底色,面板才像是浮在上面
+        .background(Color(nsColor: .underPageBackgroundColor))
         .animation(.easeInOut(duration: 0.2), value: hasImages)
         .animation(.easeInOut(duration: 0.2), value: showInfo)
         .animation(.easeInOut(duration: 0.28), value: store.mode)
@@ -127,6 +135,12 @@ struct ContentView: View {
             Text(store.errorMessage ?? "")
         }
         .onChange(of: store.selection) { keyFocus = true }
+        .onKeyPress(.escape) {
+            // 全屏时按 Esc 退出全屏(主界面拿着键盘焦点,系统默认的这个行为到不了窗口)
+            guard let window = NSApp.keyWindow, window.styleMask.contains(.fullScreen) else { return .ignored }
+            window.toggleFullScreen(nil)
+            return .handled
+        }
         .onKeyPress(.space) {
             // 空格:在普通模式和瀑布流之间切换
             guard hasImages else { return .ignored }
@@ -236,9 +250,10 @@ struct PageArrow: View {
             Color.clear
             Image(systemName: systemImage)
                 .font(.system(size: 22, weight: .semibold))
-                .foregroundStyle(.white)
+                .foregroundStyle(.primary)
                 .frame(width: 44, height: 44)
-                .background(.black.opacity(0.45), in: Circle())
+                // 液态玻璃按钮:会折射后面的照片,按下时有反馈
+                .glassEffect(.regular.interactive(), in: .circle)
                 .opacity(hovering && enabled ? 1 : 0)
                 .animation(.easeInOut(duration: 0.15), value: hovering)
         }
@@ -280,17 +295,25 @@ struct InfoPanel: View {
             .padding()
             .frame(maxWidth: .infinity, alignment: .leading)
         }
-        .background(.background)
     }
 }
 
 /// 底部缩略图条,支持水平滚动条
 struct ThumbnailStrip: View {
     @EnvironmentObject var store: ImageStore
+    @State private var position = ScrollPosition()
+    @State private var offsetX: CGFloat = 0
+    @State private var viewWidth: CGFloat = 0
+
+    /// 内容总宽度:每格 84、间距 8、两端各留 10。直接算出来,比懒加载列表的估算值准
+    private var contentWidth: CGFloat {
+        let n = CGFloat(store.images.count)
+        return n * 84 + max(n - 1, 0) * 8 + 20
+    }
 
     var body: some View {
         ScrollViewReader { proxy in
-            ScrollView(.horizontal, showsIndicators: true) {
+            ScrollView(.horizontal) {
                 LazyHStack(spacing: 8) {
                     ForEach(store.images.indices, id: \.self) { index in
                         ThumbnailCell(url: store.images[index],
@@ -305,9 +328,24 @@ struct ThumbnailStrip: View {
                     }
                 }
                 .padding(.horizontal, 10)
-                .padding(.vertical, 8)
+                .padding(.top, 8)
+                .frame(maxHeight: .infinity, alignment: .top)
             }
-            .scrollIndicators(.visible)
+            // 系统滚动条(接了鼠标时是又粗又带底槽的那种)藏起来,换成下面自己画的细滚动条
+            // 必须用 .never:.hidden 在接了鼠标时系统仍会把滚动条显示出来
+            .scrollIndicators(.never)
+            .scrollPosition($position)
+            .onScrollGeometryChange(for: [CGFloat].self) { [$0.contentOffset.x, $0.containerSize.width] } action: { _, v in
+                offsetX = v[0]
+                viewWidth = v[1]
+            }
+            .overlay(alignment: .bottom) {
+                SlimScrollbar(offset: offsetX, contentLength: contentWidth, viewLength: viewWidth) { x in
+                    position.scrollTo(x: x)
+                }
+                .padding(.horizontal, 10)
+                .padding(.bottom, 3)
+            }
             .background(WheelToHorizontalScroll())
             // 从瀑布流切回来时,直接定位到当前照片
             .onAppear { proxy.scrollTo(store.selection, anchor: .center) }
@@ -317,7 +355,49 @@ struct ThumbnailStrip: View {
                 withAnimation { proxy.scrollTo(new, anchor: .center) }
             }
         }
-        .background(.bar)
+    }
+}
+
+/// 细的圆头滚动条:平时很淡,鼠标移上去或拖动时变粗变深;可以拖动
+struct SlimScrollbar: View {
+    let offset: CGFloat
+    let contentLength: CGFloat
+    let viewLength: CGFloat
+    let scrollTo: (CGFloat) -> Void
+
+    @State private var hovering = false
+    @State private var dragStart: CGFloat?
+
+    var body: some View {
+        GeometryReader { geo in
+            let track = geo.size.width
+            let scrollable = contentLength - viewLength
+            if scrollable > 1, track > 0, viewLength > 0 {
+                let thumb = max(36, track * viewLength / contentLength)
+                let travel = max(track - thumb, 1)
+                let x = min(max(offset / scrollable, 0), 1) * travel
+                let active = hovering || dragStart != nil
+                Capsule()
+                    .fill(.primary.opacity(active ? 0.75 : 0.5))
+                    .frame(width: thumb, height: active ? 7 : 5)
+                    .frame(maxHeight: .infinity, alignment: .bottom)
+                    .offset(x: x)
+                    .animation(.easeOut(duration: 0.12), value: active)
+                    // 可点范围是整条高度,比看到的细条好抓
+                    .contentShape(Rectangle().offset(x: x).size(width: thumb, height: geo.size.height))
+                    .gesture(
+                        DragGesture(minimumDistance: 0)
+                            .onChanged { v in
+                                let start = dragStart ?? offset
+                                dragStart = start
+                                scrollTo(min(max(start + v.translation.width / travel * scrollable, 0), scrollable))
+                            }
+                            .onEnded { _ in dragStart = nil }
+                    )
+            }
+        }
+        .frame(height: 10)
+        .onHover { hovering = $0 }
     }
 }
 

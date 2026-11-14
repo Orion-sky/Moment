@@ -115,7 +115,7 @@ struct WaterfallView: View {
                         Text("正在读取照片尺寸 \(store.aspectsLoaded) / \(store.images.count)")
                             .font(.caption)
                             .padding(.horizontal, 10).padding(.vertical, 5)
-                            .background(.regularMaterial, in: Capsule())
+                            .glassEffect(.regular, in: .capsule)
                             .padding(10)
                     }
                 }
