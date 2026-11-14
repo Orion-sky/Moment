@@ -4,15 +4,41 @@ import Combine
 struct ContentView: View {
     @EnvironmentObject var store: ImageStore
     @FocusState private var keyFocus: Bool
+    @ObservedObject private var shortcuts = ShortcutStore.shared
     /// 右侧信息栏、底部缩略图条的开关(会记住上次的设置)
     @AppStorage("showInfoPanel") private var showInfo = true
     @AppStorage("showThumbnailStrip") private var showStrip = true
+    /// 外观:跟随系统 / 浅色 / 深色
+    @AppStorage("appearance") private var appearance = AppAppearance.system
     /// 瀑布流每行显示几张
     @AppStorage("waterfallColumns") private var waterfallColumns = 5
 
     /// 打开文件夹并扫描到图片后,才显示参数面板和缩略图条
     private var hasImages: Bool { !store.images.isEmpty }
     private let panelRadius: CGFloat = 16
+
+    /// 执行一个快捷键操作;当前模式下不适用时返回 false
+    private func perform(_ action: ShortcutAction) -> Bool {
+        switch action {
+        case .previous, .next:
+            // 普通模式下等同于 ← / →
+            guard store.mode == .single else { return false }
+            store.move(action == .previous ? -1 : 1)
+        case .toggleMode:
+            guard hasImages else { return false }
+            store.mode = store.mode == .single ? .waterfall : .single
+        case .toggleInfo:
+            showInfo.toggle()
+        case .toggleStrip:
+            // 瀑布流模式本来就没有缩略图条
+            guard store.mode == .single else { return false }
+            showStrip.toggle()
+        case .zoomIn: store.zoomRequests.send(1.25)
+        case .zoomOut: store.zoomRequests.send(0.8)
+        case .zoomReset: store.zoomRequests.send(0)
+        }
+        return true
+    }
 
     var body: some View {
         // 缩略图条(116)加上下留白(8 + 8)在普通模式下占掉的高度,衔接动画要用
@@ -69,9 +95,31 @@ struct ContentView: View {
         .animation(.easeInOut(duration: 0.2), value: showInfo)
         .animation(.easeInOut(duration: 0.28), value: store.mode)
         .animation(.easeInOut(duration: 0.2), value: showStrip)
+        .onAppear { appearance.apply() }
+        .onChange(of: appearance) { appearance.apply() }
         .toolbar {
-            if store.mode == .waterfall {
-                ToolbarItem {
+            // 左侧:打开文件夹
+            ToolbarItem(placement: .navigation) {
+                Button { store.chooseFolder() } label: { Label("打开文件夹", systemImage: "folder") }
+                    .help("打开文件夹…")
+            }
+
+            // 中间:怎么看(模式、筛选;瀑布流时再加列数)
+            ToolbarItemGroup(placement: .principal) {
+                Picker("显示模式", selection: $store.mode) {
+                    Label("普通", systemImage: "photo").tag(ViewMode.single)
+                    Label("瀑布流", systemImage: "square.grid.3x3").tag(ViewMode.waterfall)
+                }
+                .pickerStyle(.segmented)
+                .help("切换普通 / 瀑布流模式")
+
+                Picker("格式筛选", selection: $store.filter) {
+                    ForEach(FileFilter.allCases) { Text($0.rawValue).tag($0) }
+                }
+                .pickerStyle(.segmented)
+                .help("只显示 JPG / 只显示 RAW / 全部")
+
+                if store.mode == .waterfall {
                     HStack(spacing: 6) {
                         Image(systemName: "square.grid.2x2")
                         Slider(value: Binding(get: { Double(waterfallColumns) },
@@ -90,7 +138,9 @@ struct ContentView: View {
                     .help("瀑布流每行显示的照片数量")
                 }
             }
-            ToolbarItemGroup {
+
+            // 右侧:面板开关和外观(信息栏开关正好在信息栏上方)
+            ToolbarItemGroup(placement: .primaryAction) {
                 Toggle(isOn: $showStrip) {
                     Label("缩略图条", systemImage: "rectangle.bottomthird.inset.filled")
                 }
@@ -103,24 +153,17 @@ struct ContentView: View {
                 }
                 .help(showInfo ? "隐藏右侧信息栏" : "显示右侧信息栏")
                 .keyboardShortcut("i", modifiers: [.command, .option])
-            }
-            ToolbarItem {
-                Picker("格式筛选", selection: $store.filter) {
-                    ForEach(FileFilter.allCases) { Text($0.rawValue).tag($0) }
+
+                Menu {
+                    Picker("外观", selection: $appearance) {
+                        ForEach(AppAppearance.allCases) { Text($0.title).tag($0) }
+                    }
+                    .pickerStyle(.inline)
+                } label: {
+                    Label("外观", systemImage: appearance == .dark ? "moon.fill"
+                                              : appearance == .light ? "sun.max.fill" : "circle.lefthalf.filled")
                 }
-                .pickerStyle(.segmented)
-                .help("只显示 JPG / 只显示 RAW / 全部")
-            }
-            ToolbarItem {
-                Picker("显示模式", selection: $store.mode) {
-                    Label("普通", systemImage: "photo").tag(ViewMode.single)
-                    Label("瀑布流", systemImage: "square.grid.3x3").tag(ViewMode.waterfall)
-                }
-                .pickerStyle(.segmented)
-                .help("切换普通 / 瀑布流模式")
-            }
-            ToolbarItem {
-                Button { store.chooseFolder() } label: { Label("打开文件夹", systemImage: "folder") }
+                .help("外观:跟随系统 / 浅色 / 深色")
             }
         }
         .navigationTitle(store.current?.lastPathComponent ?? "Moment")
@@ -141,28 +184,22 @@ struct ContentView: View {
             window.toggleFullScreen(nil)
             return .handled
         }
-        .onKeyPress(.space) {
-            // 空格:在普通模式和瀑布流之间切换
-            guard hasImages else { return .ignored }
-            store.mode = store.mode == .single ? .waterfall : .single
-            return .handled
-        }
         .onKeyPress(.return) {
             // 瀑布流里按回车打开当前选中的照片
             guard store.mode == .waterfall else { return .ignored }
             store.mode = .single
             return .handled
         }
+        // 可自定义的快捷键(在"设置"里修改),见 ShortcutStore
+        .onKeyPress(phases: [.down, .repeat]) { press in
+            guard let key = ShortcutStore.normalize(press),
+                  let action = shortcuts.action(for: key) else { return .ignored }
+            // 开关类的操作按住不放时不重复触发
+            if press.phase == .repeat, !action.repeats { return .handled }
+            return perform(action) ? .handled : .ignored
+        }
         .onKeyPress(.leftArrow) { store.move(-1); return .handled }
         .onKeyPress(.rightArrow) { store.move(1); return .handled }
-        .onKeyPress(characters: CharacterSet(charactersIn: "+=-0")) { press in
-            switch press.characters {
-            case "+", "=": store.zoomRequests.send(1.25)
-            case "-": store.zoomRequests.send(0.8)
-            default: store.zoomRequests.send(0)
-            }
-            return .handled
-        }
     }
 }
 
@@ -269,6 +306,9 @@ struct PageArrow: View {
 /// 右侧参数面板
 struct InfoPanel: View {
     @EnvironmentObject var store: ImageStore
+    @State private var position = ScrollPosition()
+    /// [滚动位置, 内容高度, 可见高度]
+    @State private var metrics: [CGFloat] = [0, 0, 0]
 
     var body: some View {
         ScrollView {
@@ -294,6 +334,21 @@ struct InfoPanel: View {
             }
             .padding()
             .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        // 和缩略图条一样:藏起系统滚动条,换成细滚动条(内容一屏放得下时不显示)
+        .scrollIndicators(.never)
+        .scrollPosition($position)
+        .onScrollGeometryChange(for: [CGFloat].self) {
+            [$0.contentOffset.y, $0.contentSize.height, $0.containerSize.height]
+        } action: { _, new in
+            metrics = new
+        }
+        .overlay(alignment: .trailing) {
+            SlimScrollbar(axis: .vertical, offset: metrics[0], contentLength: metrics[1], viewLength: metrics[2]) { y in
+                position.scrollTo(y: y)
+            }
+            .padding(.vertical, 12)
+            .padding(.trailing, 3)
         }
     }
 }
@@ -360,6 +415,7 @@ struct ThumbnailStrip: View {
 
 /// 细的圆头滚动条:平时很淡,鼠标移上去或拖动时变粗变深;可以拖动
 struct SlimScrollbar: View {
+    var axis: Axis = .horizontal
     let offset: CGFloat
     let contentLength: CGFloat
     let viewLength: CGFloat
@@ -368,35 +424,45 @@ struct SlimScrollbar: View {
     @State private var hovering = false
     @State private var dragStart: CGFloat?
 
+    /// 可抓取区域的厚度(看到的细条比它细)
+    private let grip: CGFloat = 10
+
     var body: some View {
+        let horizontal = axis == .horizontal
         GeometryReader { geo in
-            let track = geo.size.width
+            let track = horizontal ? geo.size.width : geo.size.height
             let scrollable = contentLength - viewLength
             if scrollable > 1, track > 0, viewLength > 0 {
-                let thumb = max(36, track * viewLength / contentLength)
+                let thumb = min(max(36, track * viewLength / contentLength), track)
                 let travel = max(track - thumb, 1)
-                let x = min(max(offset / scrollable, 0), 1) * travel
+                let pos = min(max(offset / scrollable, 0), 1) * travel
                 let active = hovering || dragStart != nil
-                Capsule()
-                    .fill(.primary.opacity(active ? 0.75 : 0.5))
-                    .frame(width: thumb, height: active ? 7 : 5)
-                    .frame(maxHeight: .infinity, alignment: .bottom)
-                    .offset(x: x)
-                    .animation(.easeOut(duration: 0.12), value: active)
-                    // 可点范围是整条高度,比看到的细条好抓
-                    .contentShape(Rectangle().offset(x: x).size(width: thumb, height: geo.size.height))
-                    .gesture(
-                        DragGesture(minimumDistance: 0)
-                            .onChanged { v in
-                                let start = dragStart ?? offset
-                                dragStart = start
-                                scrollTo(min(max(start + v.translation.width / travel * scrollable, 0), scrollable))
-                            }
-                            .onEnded { _ in dragStart = nil }
-                    )
+                let thickness: CGFloat = active ? 7 : 5
+                // 透明的抓取区域里贴边放一根细条
+                ZStack(alignment: horizontal ? .bottom : .trailing) {
+                    Color.clear
+                    Capsule()
+                        .fill(.primary.opacity(active ? 0.75 : 0.5))
+                        .frame(width: horizontal ? thumb : thickness, height: horizontal ? thickness : thumb)
+                        .animation(.easeOut(duration: 0.12), value: active)
+                }
+                .frame(width: horizontal ? thumb : grip, height: horizontal ? grip : thumb)
+                .contentShape(Rectangle())
+                .gesture(
+                    // 用全局坐标:滑块自己在动,用它自身的坐标量出来的拖动距离会不准
+                    DragGesture(minimumDistance: 0, coordinateSpace: .global)
+                        .onChanged { v in
+                            let start = dragStart ?? offset
+                            dragStart = start
+                            let moved = horizontal ? v.translation.width : v.translation.height
+                            scrollTo(min(max(start + moved / travel * scrollable, 0), scrollable))
+                        }
+                        .onEnded { _ in dragStart = nil }
+                )
+                .offset(x: horizontal ? pos : 0, y: horizontal ? 0 : pos)
             }
         }
-        .frame(height: 10)
+        .frame(width: horizontal ? nil : grip, height: horizontal ? grip : nil)
         .onHover { hovering = $0 }
     }
 }

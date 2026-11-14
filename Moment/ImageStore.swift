@@ -22,12 +22,14 @@ struct HeroFlight: Identifiable {
 /// 瀑布流排版:依次把每张图放进当前最矮的一列
 nonisolated enum WaterfallLayout {
     static let spacing: CGFloat = 6
+    /// 右侧额外留给滚动条的空隙,免得滚动条压在最右一列照片上
+    static let scrollbarGutter: CGFloat = 10
     /// 主图四周的留白(ZoomableImage 用同一个值)
     static let viewerPadding: CGFloat = 12
 
     static func make(_ aspects: [CGFloat], width: CGFloat, columns: Int) -> (frames: [CGRect], height: CGFloat) {
         let count = min(max(columns, 1), 20)
-        let colWidth = max(1, (width - spacing * CGFloat(count + 1)) / CGFloat(count))
+        let colWidth = max(1, (width - scrollbarGutter - spacing * CGFloat(count + 1)) / CGFloat(count))
         var heights = [CGFloat](repeating: spacing, count: count)
         var frames: [CGRect] = []
         frames.reserveCapacity(aspects.count)
@@ -96,7 +98,10 @@ final class ImageStore: ObservableObject {
     @Published var mode: ViewMode = .single {
         didSet {
             guard oldValue != mode else { return }
-            loadAspects()
+            // 切换模式是一个自然的整理时机:把攒着的尺寸都用上
+            if mode == .single { waterfallRenderedRange = nil }
+            flushPendingAspects()
+            loadAspects(restart: false)
             loadCurrent(immediate: true)
             startHero(from: oldValue)
         }
@@ -209,9 +214,16 @@ final class ImageStore: ObservableObject {
     private func applyFilter() {
         let keep = current
         aspectTask?.cancel()
+        aspectTask = nil
+        pendingAspects = [:]
+        waterfallRenderedRange = nil
         let list = allImages.filter(filter.matches)
         images = list
-        aspects = list.map { aspectCache[$0] ?? 1.5 }
+        // 还没读到尺寸的照片,先借用同名文件的比例(RAW 和它的 JPG 比例几乎总是一样),
+        // 这样从 JPG 切到"全部"时,新出现的 RAW 一开始就在正确的位置,后面读到真实尺寸也不用再挪
+        var stemAspect: [String: CGFloat] = [:]
+        for (url, aspect) in aspectCache { stemAspect[Self.stem(url)] = aspect }
+        aspects = list.map { aspectCache[$0] ?? stemAspect[Self.stem($0)] ?? 1.5 }
         aspectKnown = list.map { aspectCache[$0] != nil }
         aspectsLoaded = aspectKnown.count { $0 }
         let index = keep.map { Self.bestMatch(for: $0, in: list) } ?? 0
@@ -264,6 +276,8 @@ final class ImageStore: ObservableObject {
     /// 把指定图片移到废纸篓(可在废纸篓中恢复)
     /// - Parameter withRAW: 同时删除这些照片同名的 RAW 文件(即使当前筛选下没有显示出来)
     func trash(_ requested: Set<Int>, withRAW: Bool = false) {
+        // 删除后序号会变,攒着的尺寸是按序号记的,先用上
+        flushPendingAspects()
         var indices = requested
         // 同名 RAW:显示在当前列表里的按下标一起删;没显示出来的(比如只看 JPG 时)单独删
         var hiddenRAWs: [URL] = []
@@ -347,55 +361,117 @@ final class ImageStore: ObservableObject {
         #endif
     }
 
-    /// 后台分批读取图片尺寸(只读文件头,不解码),供瀑布流排版。
-    /// 先读当前照片附近的,再读其余的;每读完一批就更新一次,不必等全部读完。
-    private func loadAspects() {
+    // MARK: 照片尺寸(瀑布流排版用)
+
+    /// 瀑布流当前渲染的照片序号范围(含屏幕上下的预加载部分);不在瀑布流模式时为 nil。由界面写入
+    var waterfallRenderedRange: ClosedRange<Int>?
+    /// 已经读到、但暂时没有用到排版里的尺寸(序号 → 比例)。
+    ///
+    /// 瀑布流是按顺序排的:改动某一张的比例,它后面所有照片的位置都会变。
+    /// 如果每读到一点就重排,屏幕里的照片会不停地跳。所以:
+    /// - 屏幕下方、还没看到的照片:读到就立即用上(改动只影响更后面的,看不见)。
+    /// - 屏幕内或上方的照片:先攒在这里,只在少数几个时机一次性用上(见 settlePendingAspects)。
+    private var pendingAspects: [Int: CGFloat] = [:]
+
+    /// 把一个新读到的比例用到排版里,或者先攒着。返回 true 表示直接写进了 `into`
+    private func route(_ index: Int, _ value: CGFloat, tolerance: CGFloat, into layout: inout [CGFloat]) {
+        // 和占位用的比例几乎一样就不改,免得为了肉眼看不出的差别重排一次
+        guard abs(layout[index] - value) / value > tolerance else { return }
+        if mode == .waterfall, let rendered = waterfallRenderedRange, index <= rendered.upperBound {
+            pendingAspects[index] = value
+        } else {
+            layout[index] = value
+        }
+    }
+
+    /// 把攒着的比例一次性用到排版里
+    private func flushPendingAspects() {
+        guard !pendingAspects.isEmpty else { return }
+        var updated = aspects
+        for (i, value) in pendingAspects where updated.indices.contains(i) { updated[i] = value }
+        pendingAspects = [:]
+        aspects = updated
+    }
+
+    /// 屏幕里的照片尺寸都读齐了、并且其中有攒着没用上的:这时一次性用上。
+    /// 表现为进入瀑布流或跳到新位置后不久,画面整理一次,之后就不动了。
+    private func settlePendingAspects() {
+        guard let rendered = waterfallRenderedRange, !pendingAspects.isEmpty else { return }
+        let range = rendered.clamped(to: 0...max(aspectKnown.count - 1, 0))
+        guard pendingAspects.keys.contains(where: { range.contains($0) }),
+              range.allSatisfy({ aspectKnown.indices.contains($0) && aspectKnown[$0] }) else { return }
+        flushPendingAspects()
+    }
+
+    /// 下一批要读的照片:从屏幕顶部那张开始往下(马上要看到的),读完再往上
+    private func nextAspectBatch(_ count: Int) -> [Int] {
+        guard !aspectKnown.isEmpty else { return [] }
+        let pivot = min(max(waterfallRenderedRange?.lowerBound ?? selection, 0), aspectKnown.count - 1)
+        var batch: [Int] = []
+        var i = pivot
+        while i < aspectKnown.count, batch.count < count {
+            if !aspectKnown[i] { batch.append(i) }
+            i += 1
+        }
+        i = pivot - 1
+        while i >= 0, batch.count < count {
+            if !aspectKnown[i] { batch.append(i) }
+            i -= 1
+        }
+        return batch
+    }
+
+    /// 后台分批读取图片尺寸(只读文件头,不解码)。
+    /// - Parameter restart: false 时,如果已经在读就什么都不做
+    private func loadAspects(restart: Bool = true) {
+        if !restart, aspectTask != nil { return }
         aspectTask?.cancel()
         aspectTask = nil
-        let pending = aspectKnown.indices.filter { !aspectKnown[$0] }
-        guard !pending.isEmpty else { return }
-        let sel = selection
-        let order = pending.filter { abs($0 - sel) <= 150 } + pending.filter { abs($0 - sel) > 150 }
-        let urls = order.map { images[$0] }
+        guard aspectKnown.contains(false) else { return }
 
-        // 列表变化(删除 / 换文件夹)时会先取消本任务再改数组,所以下标始终对得上
+        // 列表变化(删除 / 换筛选 / 换文件夹)时会先取消本任务再改数组,所以下标始终对得上
         aspectTask = Task {
-            var start = 0
-            while start < order.count {
-                let end = min(start + 64, order.count)
-                let chunk = Array(urls[start..<end])
+            while true {
+                // 每一批都按当前屏幕位置重新挑,滚到哪就先读哪
+                let batch = nextAspectBatch(64)
+                if batch.isEmpty { break }
+                let chunk = batch.map { images[$0] }
                 let values = await Task.detached(priority: .userInitiated) { ImageMeta.aspects(chunk) }.value
                 guard !Task.isCancelled else { return }
                 var updated = aspects
                 var newlyKnown = 0
                 for (k, value) in values.enumerated() {
-                    let i = order[start + k]
-                    // 这张的比例可能已经从解码出的图片得知了(见 noteAspect),不重复计数、不改动
+                    let i = batch[k]
+                    // 这张的比例可能已经从解码出的图片得知了(见 noteAspect),不重复处理
                     guard !aspectKnown[i] else { continue }
-                    updated[i] = value
                     aspectCache[chunk[k]] = value
                     aspectKnown[i] = true
                     newlyKnown += 1
+                    route(i, value, tolerance: 0.01, into: &updated)
                 }
-                if newlyKnown > 0 {
-                    aspects = updated
-                    aspectsLoaded += newlyKnown
-                }
-                start = end
+                if updated != aspects { aspects = updated }
+                if newlyKnown > 0 { aspectsLoaded += newlyKnown }
+                settlePendingAspects()
             }
+            // 全部读完:把还攒着的一次性用上
+            flushPendingAspects()
+            aspectTask = nil
         }
     }
 
     /// 任何一张图解码出来(缩略图或主图)时,顺便记下它的真实宽高比。
-    /// 这样看过的照片不用等后台慢慢读文件头,切到瀑布流时竖拍的照片一开始就是竖的。
     func noteAspect(_ url: URL, _ value: CGFloat) {
         guard value.isFinite, value > 0, aspectCache[url] == nil else { return }
         let aspect = min(max(value, 0.3), 3.5)
         aspectCache[url] = aspect
         guard let i = images.firstIndex(of: url), aspectKnown.indices.contains(i), !aspectKnown[i] else { return }
-        aspects[i] = aspect
         aspectKnown[i] = true
+        // 小缩略图量出来的比例有 1–2% 的误差,差别在这个范围内就沿用已有的值
+        var updated = aspects
+        route(i, aspect, tolerance: 0.025, into: &updated)
+        if updated != aspects { aspects = updated }
         aspectsLoaded += 1
+        settlePendingAspects()
     }
 
     /// 最近看过 / 预取的主图
@@ -521,7 +597,9 @@ nonisolated enum ImageMeta {
         if let v = tiff[kCGImagePropertyTIFFMake] { cam.append(MetaRow(name: "厂商", value: "\(v)")) }
         if let v = tiff[kCGImagePropertyTIFFModel] { cam.append(MetaRow(name: "型号", value: "\(v)")) }
         if let v = exif[kCGImagePropertyExifLensModel] { cam.append(MetaRow(name: "镜头", value: "\(v)")) }
-        if let v = exif[kCGImagePropertyExifDateTimeOriginal] { cam.append(MetaRow(name: "拍摄时间", value: "\(v)")) }
+        if let v = exif[kCGImagePropertyExifDateTimeOriginal] as? String {
+            cam.append(MetaRow(name: "拍摄时间", value: formatEXIFDate(v)))
+        }
         if !cam.isEmpty { sections.append(MetaSection(title: "相机", rows: cam)) }
 
         // 曝光
@@ -547,6 +625,16 @@ nonisolated enum ImageMeta {
             ]))
         }
         return sections
+    }
+
+    /// EXIF 里的时间是 "2024:05:01 12:34:56" 这种写法,转成和"修改时间"一致的本地格式。
+    /// EXIF 时间不带时区,记录的就是相机上显示的时刻,所以按原样的时分秒显示,不做时区换算。
+    static func formatEXIFDate(_ raw: String) -> String {
+        let parser = DateFormatter()
+        parser.locale = Locale(identifier: "en_US_POSIX")
+        parser.dateFormat = "yyyy:MM:dd HH:mm:ss"
+        guard let date = parser.date(from: raw.trimmingCharacters(in: .whitespaces)) else { return raw }
+        return date.formatted(date: .abbreviated, time: .standard)
     }
 
     static let rawExts: Set<String> = ["dng", "cr2", "cr3", "nef", "arw", "raf", "orf", "rw2", "pef", "srw", "raw"]
@@ -669,11 +757,16 @@ final class ThumbnailCache {
         return cached(url)
     }
 
-    /// - Parameter priority: 越大越先加载(瀑布流里传"离选中照片的距离"的负值)
-    func load(_ url: URL, size: Int = stripSize, priority: Double = 0) async -> NSImage? {
+    /// 告诉加载队列"现在最想看的位置"(瀑布流里的内容坐标);离它越近的格子越先加载
+    func setFocus(_ point: CGPoint) {
+        Task { await limiter.setFocus(point) }
+    }
+
+    /// - Parameter point: 这张图在瀑布流里的位置。排队时按它到当前关注点的距离决定先后
+    func load(_ url: URL, size: Int = stripSize, point: CGPoint? = nil) async -> NSImage? {
         if let hit = cached(url, size: size) { return hit }
         // 排队期间格子滚出屏幕会被取消,直接放弃
-        guard await limiter.acquire(priority: priority) else { return nil }
+        guard await limiter.acquire(point: point) else { return nil }
         if Task.isCancelled { await limiter.release(); return nil }
         let embedded = size <= Self.stripSize
         let cg = await Task.detached(priority: .medium) {
@@ -689,24 +782,28 @@ final class ThumbnailCache {
 }
 
 /// 并发限制器。
-/// - 按优先级发放名额:优先级高的先执行;优先级相同时后来的先执行
-///   (刚滚进屏幕的格子先于更早排队的)。
+/// - 发放名额时才决定先后:带位置的请求里,离"当前关注点"最近的先执行。
+///   关注点随滚动实时更新,所以排着队的请求会跟着重新排序——滚到哪就先加载哪。
+/// - 不带位置的请求(缩略图条)后来的先执行。
 /// - 同一时刻涌入的一批请求会先攒几毫秒再一起排序,
-///   否则最先到的几个会不看优先级直接拿走名额。
+///   否则最先到的几个会不看先后直接拿走名额。
 /// - 被取消的请求立即出队,不占位置。
 actor Limiter {
     private var available: Int
-    private var waiters: [(id: UUID, priority: Double, cont: CheckedContinuation<Bool, Never>)] = []
+    private var waiters: [(id: UUID, point: CGPoint?, cont: CheckedContinuation<Bool, Never>)] = []
     private var drainScheduled = false
+    private var focus: CGPoint = .zero
     init(max: Int) { available = max }
 
+    func setFocus(_ point: CGPoint) { focus = point }
+
     /// 返回 false 表示等待期间被取消,未获得名额
-    func acquire(priority: Double = 0) async -> Bool {
+    func acquire(point: CGPoint? = nil) async -> Bool {
         if Task.isCancelled { return false }
         let id = UUID()
         return await withTaskCancellationHandler {
             await withCheckedContinuation { cont in
-                waiters.append((id, priority, cont))
+                waiters.append((id, point, cont))
                 scheduleDrain()
             }
         } onCancel: {
@@ -736,8 +833,14 @@ actor Limiter {
     private func drain() {
         drainScheduled = false
         while available > 0, !waiters.isEmpty {
-            var best = 0
-            for i in waiters.indices where waiters[i].priority >= waiters[best].priority { best = i }
+            // 带位置的:离关注点最近的;都不带位置:最后来的
+            var best = waiters.count - 1
+            var bestDistance = CGFloat.infinity
+            for i in waiters.indices {
+                guard let p = waiters[i].point else { continue }
+                let d = hypot(p.x - focus.x, p.y - focus.y)
+                if d < bestDistance { bestDistance = d; best = i }
+            }
             available -= 1
             waiters.remove(at: best).cont.resume(returning: true)
         }

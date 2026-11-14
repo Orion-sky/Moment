@@ -2,6 +2,29 @@ import SwiftUI
 import Combine
 import AppKit
 
+/// 外观:跟随系统 / 浅色 / 深色
+enum AppAppearance: String, CaseIterable, Identifiable {
+    case system, light, dark
+    var id: Self { self }
+
+    var title: String {
+        switch self {
+        case .system: "跟随系统"
+        case .light: "浅色"
+        case .dark: "深色"
+        }
+    }
+
+    /// 应用到整个应用(包括工具栏、菜单和窗口边框)
+    @MainActor func apply() {
+        switch self {
+        case .system: NSApp.appearance = nil
+        case .light: NSApp.appearance = NSAppearance(named: .aqua)
+        case .dark: NSApp.appearance = NSAppearance(named: .darkAqua)
+        }
+    }
+}
+
 final class AppDelegate: NSObject, NSApplicationDelegate {
     /// 关闭窗口即退出应用
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
@@ -10,6 +33,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 @main struct MyApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
     @StateObject private var store = ImageStore()
+    @AppStorage("appearance") private var appearance = AppAppearance.system
 
     var body: some Scene {
         WindowGroup {
@@ -23,6 +47,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     .keyboardShortcut("o")
             }
             CommandGroup(before: .toolbar) {
+                Picker("外观", selection: $appearance) {
+                    ForEach(AppAppearance.allCases) { Text($0.title).tag($0) }
+                }
+                Divider()
                 Button("普通模式") { store.mode = .single }
                     .keyboardShortcut("1")
                 Button("瀑布流模式") { store.mode = .waterfall }
@@ -36,6 +64,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     .keyboardShortcut("0")
                 Divider()
             }
+        }
+
+        // 设置窗口(菜单"设置…"或 ⌘,)
+        Settings {
+            SettingsView()
         }
     }
 }

@@ -5,7 +5,7 @@
     "Release",
   ],
   "localizations": {
-    "development": "en",
+    "development": "zh-Hans",
     "supported": [
       "Base",
     ],

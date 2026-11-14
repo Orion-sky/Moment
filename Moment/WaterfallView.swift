@@ -1,4 +1,5 @@
 import SwiftUI
+import Combine
 import AppKit
 
 /// 瀑布流模式:所有照片按原始比例分列铺开,纵向滚动。
@@ -31,28 +32,37 @@ struct WaterfallView: View {
                 let layout = makeLayout(store.aspects, width: geo.size.width)
                 let _ = (scroll.frames = layout.frames)
                 // 排版由这三项决定:宽度(开关信息栏、缩放窗口)、已读到的尺寸、每行张数
-                let layoutKey = LayoutKey(width: geo.size.width, loaded: store.aspectsLoaded, columns: columnCount)
+                let layoutKey = LayoutKey(width: geo.size.width, loaded: store.aspectsLoaded,
+                                          columns: columnCount, list: store.listVersion)
                 let viewHeight = geo.size.height
                 // 第一次渲染时还没滚动到位:直接按选中照片所在的位置算可见范围,
                 // 这样最先创建、最先开始加载的就是选中照片周围的格子,而不是最顶上的
                 let activeBucket = scroll.started ? bucket : Int(centeredOffset(layout, viewHeight: geo.size.height) / step)
                 let _ = reportSelectionRect(layout.frames, offset: scroll.started ? scroll.y : centeredOffset(layout, viewHeight: geo.size.height))
+                // 每次重新渲染(进入、选中项变化、排版变化)时同步一次加载关注点
+                let _ = updateFocus(layout.frames,
+                                    offset: scroll.started ? scroll.y : centeredOffset(layout, viewHeight: geo.size.height),
+                                    viewHeight: geo.size.height, width: geo.size.width)
                 let top = CGFloat(activeBucket) * step - overscan
                 let bottom = CGFloat(activeBucket) * step + step + geo.size.height + overscan
                 let visible = layout.frames.indices.filter {
                     layout.frames[$0].maxY >= top && layout.frames[$0].minY <= bottom
                 }
+                // 告诉 store 现在渲染的是哪一段,它据此决定新读到的尺寸是立即用上还是先攒着
+                let _ = (store.waterfallRenderedRange = visible.isEmpty ? nil : visible.min()!...visible.max()!)
                 ScrollView(.vertical) {
                     ZStack(alignment: .topLeading) {
                         ForEach(visible, id: \.self) { index in
                             let f = layout.frames[index]
-                            cell(index, frame: f, priority: loadPriority(index, in: layout.frames))
+                            cell(index, frame: f)
                                 .frame(width: f.width, height: f.height)
                                 .offset(x: f.minX, y: f.minY)
                         }
                     }
                     .frame(width: geo.size.width, height: layout.height, alignment: .topLeading)
                 }
+                // 系统滚动条藏起来,换成和缩略图条、信息栏一样的细滚动条
+                .scrollIndicators(.never)
                 .scrollPosition($position)
                 // 调整每行张数时的整体缩放(见下面 onChange 里的说明)
                 .scaleEffect(zoomScale, anchor: zoomAnchor)
@@ -64,6 +74,7 @@ struct WaterfallView: View {
                 .onScrollGeometryChange(for: CGFloat.self) { $0.contentOffset.y } action: { _, y in
                     scroll.y = y
                     reportSelectionRect(layout.frames, offset: y)
+                    updateFocus(layout.frames, offset: y, viewHeight: viewHeight, width: geo.size.width)
                     // 排版刚变、还没重新对齐时不更新锚点,否则会记成错的照片
                     if scroll.settledKey == layoutKey { scroll.updateAnchor(prefer: store.selection, viewHeight: viewHeight) }
                     let b = Int(y / step)
@@ -72,6 +83,13 @@ struct WaterfallView: View {
                 // 排版变化(信息栏开关、窗口缩放、调整每行张数、读到新一批尺寸)后,
                 // 让锚点照片留在屏幕上的同一高度。锚点优先是选中的那张(它在屏幕内时)
                 .onChange(of: layoutKey) { old, new in
+                    // 列表整体换了(切换筛选 / 换文件夹):旧的锚点是旧列表里的序号,不能再用,
+                    // 直接定位到当前照片。以前这里和"列表变化"是两个各自滚动的处理,会连着滚好几次
+                    if old.list != new.list {
+                        reveal(layout, viewHeight: viewHeight, center: true)
+                        scroll.settledKey = layoutKey
+                        return
+                    }
                     let columnsChanged = old.columns != new.columns
                     // 锚点照片在旧排版下的屏幕位置和宽度(下面 defer 里会被更新成新的)
                     let oldMidX = scroll.anchorMidX, oldWidth = scroll.anchorWidth
@@ -110,6 +128,13 @@ struct WaterfallView: View {
                     }
                 }
                 .onAppear { scroll.settledKey = layoutKey }
+                .overlay(alignment: .trailing) {
+                    WaterfallScrollbar(box: scroll, contentLength: layout.height, viewLength: geo.size.height) { y in
+                        position.scrollTo(y: y)
+                    }
+                    .padding(.vertical, 6)
+                    .padding(.trailing, 2)
+                }
                 .overlay(alignment: .bottom) {
                     if store.aspectsLoaded < store.images.count {
                         Text("正在读取照片尺寸 \(store.aspectsLoaded) / \(store.images.count)")
@@ -123,8 +148,6 @@ struct WaterfallView: View {
                     reveal(layout, viewHeight: geo.size.height, center: true)
                     scroll.started = true
                 }
-                // 切换筛选后列表整体换了,重新定位到当前照片
-                .onChange(of: store.listVersion) { reveal(layout, viewHeight: geo.size.height, center: true) }
                 .onChange(of: store.selection) { reveal(layout, viewHeight: geo.size.height, center: false) }
             }
         }
@@ -132,18 +155,25 @@ struct WaterfallView: View {
         .background(Color(nsColor: .underPageBackgroundColor))
     }
 
-    /// 加载优先级:离选中照片越近越高,选中的那张最高
-    private func loadPriority(_ index: Int, in frames: [CGRect]) -> Double {
-        guard frames.indices.contains(store.selection) else { return 0 }
-        let a = frames[index], b = frames[store.selection]
-        return -Double(hypot(a.midX - b.midX, a.midY - b.midY))
+    /// 更新加载的关注点:选中的照片在屏幕内时是它(先出它,再向外扩散),
+    /// 否则是屏幕中心(滚到哪就先加载哪)
+    private func updateFocus(_ frames: [CGRect], offset: CGFloat, viewHeight: CGFloat, width: CGFloat) {
+        var focus = CGPoint(x: width / 2, y: offset + viewHeight / 2)
+        if frames.indices.contains(store.selection) {
+            let f = frames[store.selection]
+            if f.maxY > offset, f.minY < offset + viewHeight { focus = CGPoint(x: f.midX, y: f.midY) }
+        }
+        // 变化不大就不重复通知
+        guard hypot(focus.x - scroll.lastFocus.x, focus.y - scroll.lastFocus.y) > 40 else { return }
+        scroll.lastFocus = focus
+        ThumbnailCache.shared.setFocus(focus)
     }
 
-    private func cell(_ index: Int, frame: CGRect, priority: Double) -> some View {
+    private func cell(_ index: Int, frame: CGRect) -> some View {
         WaterfallCell(url: store.images[index],
                       // 按格子的实际像素大小(高分屏要乘以倍率)取图;竖拍照片的长边是高度
                       pixelSize: ThumbnailCache.waterfallSize(forPixels: max(frame.width, frame.height) * displayScale),
-                      priority: priority,
+                      point: CGPoint(x: frame.midX, y: frame.midY),
                       // 选中的这张:清晰缩略图还没读出来时先用主图顶着,
                       // 否则衔接动画飞到位后会露出一下灰色占位
                       fallback: index == store.selection ? store.mainImage : nil,
@@ -156,6 +186,8 @@ struct WaterfallView: View {
                 store.click(index, shift: flags.contains(.shift), command: flags.contains(.command))
             }
             .simultaneousGesture(TapGesture(count: 2).onEnded {
+                // 按着 ⌘ 或 Shift 连点两下是在加选 / 取消,不是要打开照片
+                guard NSEvent.modifierFlags.isDisjoint(with: [.command, .shift]) else { return }
                 store.click(index, shift: false, command: false)
                 // 选中项刚换成这张,先更新它的位置,衔接动画才会从这张起飞
                 reportSelectionRect(scroll.frames, offset: scroll.y)
@@ -226,8 +258,24 @@ struct WaterfallView: View {
 }
 
 /// 记录当前滚动位置,不触发界面刷新
-private final class ScrollOffsetBox {
-    var y: CGFloat = 0
+/// 滚动条单独观察滚动位置:每滚一下只重画滚动条自己,不用重排整个瀑布流
+private struct WaterfallScrollbar: View {
+    @ObservedObject var box: ScrollOffsetBox
+    let contentLength: CGFloat
+    let viewLength: CGFloat
+    let scrollTo: (CGFloat) -> Void
+
+    var body: some View {
+        SlimScrollbar(axis: .vertical, offset: box.y, contentLength: contentLength,
+                      viewLength: viewLength, scrollTo: scrollTo)
+    }
+}
+
+private final class ScrollOffsetBox: ObservableObject {
+    /// 只有它会通知界面(给滚动条用);其余属性改动都不触发刷新
+    @Published var y: CGFloat = 0
+    /// 上次通知给加载队列的关注点
+    var lastFocus = CGPoint(x: -1000, y: -1000)
     /// Command + 滚轮调列数时累计的滚动量
     var columnWheel: CGFloat = 0
     /// 锚点照片在屏幕上的水平中心和宽度(调整列数的缩放动画要用)
@@ -263,13 +311,15 @@ private struct LayoutKey: Hashable {
     let width: CGFloat
     let loaded: Int
     let columns: Int
+    let list: Int
 }
 
 struct WaterfallCell: View {
     let url: URL
     /// 需要的图片尺寸(最长边像素),见 ThumbnailCache.waterfallSizes
     let pixelSize: Int
-    let priority: Double
+    /// 在瀑布流里的位置,加载队列按它到当前关注点的距离排先后
+    let point: CGPoint
     let fallback: NSImage?
     let selected: Bool
     let current: Bool
@@ -308,7 +358,7 @@ struct WaterfallCell: View {
                         image = nil
                     }
                     shownURL = url
-                    if let full = await cache.load(url, size: pixelSize, priority: priority) { image = full }
+                    if let full = await cache.load(url, size: pixelSize, point: point) { image = full }
                 }
                 shownURL = url
             }
