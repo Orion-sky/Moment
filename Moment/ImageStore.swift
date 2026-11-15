@@ -677,6 +677,19 @@ final class ImageStore: ObservableObject {
         indices.sorted().filter { images.indices.contains($0) }.map { images[$0] }
     }
 
+    /// 把照片文件放进剪贴板:在访达里粘贴是拷贝文件,在聊天、邮件等应用里粘贴是插入照片
+    func copyToPasteboard(_ indices: Set<Int>) {
+        let files = urls(at: indices)
+        guard !files.isEmpty else { return }
+        let pasteboard = NSPasteboard.general
+        pasteboard.clearContents()
+        if pasteboard.writeObjects(files as [NSURL]) {
+            edgeNotice = EdgeNotice(text: files.count > 1 ? "已拷贝 \(files.count) 张照片" : "已拷贝")
+        } else {
+            edgeNotice = EdgeNotice(text: "拷贝失败", duration: 2)
+        }
+    }
+
     func revealInFinder(_ indices: Set<Int>) {
         #if os(macOS)
         NSWorkspace.shared.activateFileViewerSelecting(indices.sorted().compactMap { images.indices.contains($0) ? images[$0] : nil })

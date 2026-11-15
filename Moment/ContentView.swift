@@ -672,6 +672,8 @@ struct PhotoContextMenu: View {
 
     var body: some View {
         let targets = store.targets(forContextAt: index)
+        Button(targets.count > 1 ? "拷贝 \(targets.count) 张照片" : "拷贝") { store.copyToPasteboard(targets) }
+        Divider()
         Button(targets.count > 1 ? "将 \(targets.count) 张照片移到废纸篓" : "移到废纸篓",
                role: .destructive) { store.trash(targets) }
         // 这些照片里有同名 RAW 时才出现
