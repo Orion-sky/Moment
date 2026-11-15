@@ -857,7 +857,7 @@ nonisolated enum ImageMeta {
         if let m = p[kCGImagePropertyColorModel] as? String { img.append(MetaRow(name: "色彩模型", value: m)) }
         if let c = p[kCGImagePropertyProfileName] as? String { img.append(MetaRow(name: "色彩配置", value: c)) }
         if let d = p[kCGImagePropertyDepth] { img.append(MetaRow(name: "位深", value: "\(d)")) }
-        if let o = p[kCGImagePropertyOrientation] { img.append(MetaRow(name: "方向", value: "\(o)")) }
+        if let o = p[kCGImagePropertyOrientation] as? Int { img.append(MetaRow(name: "方向", value: describeOrientation(o))) }
         if !img.isEmpty { sections.append(MetaSection(title: "图像", rows: img)) }
 
         // 相机
@@ -882,7 +882,7 @@ nonisolated enum ImageMeta {
         if let v = exif[kCGImagePropertyExifFocalLength] as? Double { exp.append(MetaRow(name: "焦距", value: String(format: "%.0f mm", v))) }
         if let v = equivalentFocalLength(exif: exif, properties: p) { exp.append(MetaRow(name: "等效焦距", value: v)) }
         if let v = exif[kCGImagePropertyExifExposureBiasValue] as? Double { exp.append(MetaRow(name: "曝光补偿", value: String(format: "%+.1f EV", v))) }
-        if let v = exif[kCGImagePropertyExifFlash] { exp.append(MetaRow(name: "闪光灯", value: "\(v)") ) }
+        if let v = exif[kCGImagePropertyExifFlash] as? Int { exp.append(MetaRow(name: "闪光灯", value: describeFlash(v))) }
         if !exp.isEmpty { sections.append(MetaSection(title: "曝光", rows: exp)) }
 
         // GPS
@@ -896,6 +896,47 @@ nonisolated enum ImageMeta {
             ]))
         }
         return sections
+    }
+
+    /// 方向:照片里记的是 1–8 的编号,表示显示时要怎么转才是正的。
+    /// 应用显示时已经按它转正了,这里说明的是相机当时的拍法
+    static func describeOrientation(_ value: Int) -> String {
+        switch value {
+        case 1: "横拍"
+        case 3: "横拍(相机倒置)"
+        case 6: "竖拍(相机顺时针转 90°)"
+        case 8: "竖拍(相机逆时针转 90°)"
+        case 2: "横拍(左右镜像)"
+        case 4: "横拍(上下镜像)"
+        case 5: "竖拍(镜像)"
+        case 7: "竖拍(镜像)"
+        default: "未知(\(value))"
+        }
+    }
+
+    /// 闪光灯:照片里记的是一个按位组合的数字,拆成"有没有闪"和"什么模式"
+    static func describeFlash(_ value: Int) -> String {
+        // 第 5 位:相机没有闪光灯
+        if value & 0x20 != 0 { return "无闪光灯" }
+        var parts = [value & 0x01 != 0 ? "已闪光" : "未闪光"]
+        // 第 3–4 位:模式
+        switch (value >> 3) & 0x03 {
+        case 1: parts.append("强制开启")
+        case 2: parts.append("强制关闭")
+        case 3: parts.append("自动")
+        default: break
+        }
+        // 第 6 位:防红眼
+        if value & 0x40 != 0 { parts.append("防红眼") }
+        // 第 1–2 位:有没有检测到反射回来的闪光(只有闪了才有意义)
+        if value & 0x01 != 0 {
+            switch (value >> 1) & 0x03 {
+            case 2: parts.append("未检测到回光")
+            case 3: parts.append("检测到回光")
+            default: break
+            }
+        }
+        return parts.joined(separator: ",")
     }
 
     /// 35mm 等效焦距。

@@ -16,6 +16,8 @@ struct ContentView: View {
     /// 打开文件夹并扫描到图片后,才显示参数面板和缩略图条
     private var hasImages: Bool { !store.images.isEmpty }
     private let panelRadius: CGFloat = 16
+    /// 缩略图条面板的高度:上留白 8 + 缩略图 84 + 到滚动条的间距 6 + 滚动条 5 + 下留白 4
+    private let stripHeight: CGFloat = 107
 
     /// 给工具栏控件用的绑定:读是即时的,写推到下一轮主线程循环。
     ///
@@ -74,13 +76,13 @@ struct ContentView: View {
     /// 窗口内容。铺满整个窗口,包括工具栏后面;topInset 是工具栏占的高度
     @ViewBuilder private func content(topInset: CGFloat) -> some View {
         let _ = (store.topInset = topInset)
-        // 缩略图条(116)加上下留白(8 + 8)在普通模式下盖住的高度,衔接动画要用
-        let _ = (store.stripExtraHeight = showStrip ? 132 : 0)
+        // 缩略图条加上下留白在普通模式下盖住的高度,衔接动画要用
+        let _ = (store.stripExtraHeight = showStrip ? stripHeight + 16 : 0)
         // 信息栏浮在照片区域上面,这是它盖住的宽度(面板 280 + 右边留白 8)
         let infoInset: CGFloat = hasImages && showInfo ? 288 : 0
         let _ = (store.trailingInset = infoInset)
-        // 缩略图条也浮在照片区域上面,这是它盖住的高度(面板 116 + 上下留白各 8)
-        let stripInset: CGFloat = hasImages && showStrip && store.mode == .single ? 132 : 0
+        // 缩略图条也浮在照片区域上面,这是它盖住的高度(面板 + 上下留白各 8)
+        let stripInset: CGFloat = hasImages && showStrip && store.mode == .single ? stripHeight + 16 : 0
         ZStack {
             ZStack {
                 ZStack {
@@ -161,7 +163,7 @@ struct ContentView: View {
             if stripInset > 0 {
                 // 缩略图条同样浮在照片区域上面,照片放大后会延伸到它下面
                 ThumbnailStrip()
-                    .frame(height: 116)
+                    .frame(height: stripHeight)
                     .clipShape(.rect(cornerRadius: panelRadius))
                     .glassEffect(.regular, in: .rect(cornerRadius: panelRadius))
                     .padding(8)
@@ -592,7 +594,7 @@ struct ThumbnailStrip: View {
                     position.scrollTo(x: x)
                 }
                 .padding(.horizontal, 10)
-                .padding(.bottom, 3)
+                .padding(.bottom, 4)
             }
             .background(WheelCatcher(verticalOnly: true) { dy, precise, _ in
                 wheelScroll(dy: dy, precise: precise)
