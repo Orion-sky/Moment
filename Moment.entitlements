@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- 沙盒本身和"用户选择的文件可读写"由构建设置生成
+	     (ENABLE_APP_SANDBOX、ENABLE_USER_SELECTED_FILES),这里只补它们没有覆盖的一项 -->
+	<!-- 把用户授权过的文件夹记成书签,下次启动不用重新授权 -->
+	<key>com.apple.security.files.bookmarks.app-scope</key>
+	<true/>
+</dict>
+</plist>

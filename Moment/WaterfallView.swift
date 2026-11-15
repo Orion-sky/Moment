@@ -18,7 +18,7 @@ struct WaterfallView: View {
     /// 可见范围按这个步长更新,避免每滚动一个像素都刷新
     private let step: CGFloat = 200
     /// 屏幕上下额外渲染的距离
-    private let overscan: CGFloat = 600
+    private let overscan: CGFloat = 300
 
     private let columnAnimation = Animation.easeOut(duration: 0.25)
     @State private var zoomScale: CGFloat = 1
@@ -137,8 +137,9 @@ struct WaterfallView: View {
                     .padding(.vertical, 6)
                     // 滚动条本身不伸到工具栏后面
                     .padding(.top, topInset)
-                    // 离右边(信息栏)留一点距离;左边和照片的距离由 scrollbarGutter 保证
-                    .padding(.trailing, 6)
+                    // 让滚动条在最右一列照片和信息栏的正中间:
+                    // 照片右边到信息栏一共 spacing + scrollbarGutter,减去滚动条自己的 5,两边各分一半
+                    .padding(.trailing, (WaterfallLayout.spacing + WaterfallLayout.scrollbarGutter - 5) / 2)
                 }
                 .overlay(alignment: .bottom) {
                     if store.aspectsLoaded < store.images.count {
@@ -274,14 +275,31 @@ private struct WaterfallScrollbar: View {
     let scrollTo: (CGFloat) -> Void
 
     var body: some View {
-        SlimScrollbar(axis: .vertical, offset: box.y, contentLength: contentLength,
+        SlimScrollbar(axis: .vertical, offset: box.shownY, contentLength: contentLength,
                       viewLength: viewLength, scrollTo: scrollTo)
     }
 }
 
 private final class ScrollOffsetBox: ObservableObject {
-    /// 只有它会通知界面(给滚动条用);其余属性改动都不触发刷新
-    @Published var y: CGFloat = 0
+    /// 当前滚动位置。改它不会直接通知界面
+    var y: CGFloat = 0 { didSet { if y != oldValue { schedulePublish() } } }
+    /// 给滚动条显示用的滚动位置,只有它会通知界面。
+    ///
+    /// 滚动位置是在界面刷新的过程中报上来的(滚动回调、定位、排版变化),
+    /// 如果在那个时刻直接发通知,SwiftUI 会警告"在界面更新过程中发布变化"。
+    /// 所以攒到这一轮刷新结束后再发,同一轮里变了多少次都只发一次。
+    @Published private(set) var shownY: CGFloat = 0
+    private var publishScheduled = false
+
+    private func schedulePublish() {
+        guard !publishScheduled else { return }
+        publishScheduled = true
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.publishScheduled = false
+            if self.shownY != self.y { self.shownY = self.y }
+        }
+    }
     /// 上次通知给加载队列的关注点
     var lastFocus = CGPoint(x: -1000, y: -1000)
     /// Command + 滚轮调列数时累计的滚动量

@@ -23,7 +23,7 @@ struct HeroFlight: Identifiable {
 nonisolated enum WaterfallLayout {
     static let spacing: CGFloat = 6
     /// 右侧额外留给滚动条的空隙,免得滚动条压在最右一列照片上
-    static let scrollbarGutter: CGFloat = 14
+    static let scrollbarGutter: CGFloat = 9
     /// 主图四周的留白(ZoomableImage 用同一个值)
     static let viewerPadding: CGFloat = 12
 
@@ -188,12 +188,64 @@ final class ImageStore: ObservableObject {
         panel.canChooseFiles = false
         panel.allowsMultipleSelection = false
         panel.prompt = "打开"
-        if panel.runModal() == .OK, let url = panel.url { open(folder: url) }
+        if panel.runModal() == .OK, let url = panel.url {
+            // 记住这次授权:以后从访达双击这个文件夹里的照片,就能直接浏览整个文件夹
+            FolderAccess.shared.remember(url)
+            open(folder: url)
+        }
         #endif
     }
 
-    func open(folder url: URL) {
+    /// 单例:访达把文件交给应用时(双击照片、拖到程序坞图标)要从应用代理里找到它
+    static let shared = ImageStore()
+
+    /// 从访达打开:文件夹就直接打开;照片则打开它所在的文件夹并定位到它
+    func open(urls: [URL]) {
+        guard let url = urls.first else { return }
+        var isDirectory: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory) else { return }
+        if isDirectory.boolValue {
+            // 系统把这个文件夹交给应用时已经给了权限,顺便记住
+            FolderAccess.shared.remember(url)
+            open(folder: url)
+            return
+        }
+        // 打开单张照片是要看这一张:回到普通模式
+        mode = .single
+        let parent = url.deletingLastPathComponent()
+        // 沙盒下系统只给了这一张照片的权限。要翻看同文件夹的其他照片,需要文件夹的权限:
+        // 以前授权过(或它的上级授权过)就直接用,否则问一次并记住
+        if FolderAccess.shared.canRead(parent) || FolderAccess.shared.request(for: parent) {
+            open(folder: parent, selecting: url)
+        } else {
+            // 用户没有授权:只显示交过来的这几张
+            openOnly(files: urls)
+        }
+    }
+
+    /// 只显示指定的几个文件(没有所在文件夹的权限时)
+    private func openOnly(files: [URL]) {
+        scanTask?.cancel()
+        folder = nil
+        allImages = files
+            .filter { !$0.hasDirectoryPath }
+            .sorted { $0.lastPathComponent.localizedStandardCompare($1.lastPathComponent) == .orderedAscending }
+        picked = []
+        rebuildRAWIndex()
+        aspectCache = [:]
+        pendingSelect = files.first
+        // 只有这几张,不管当前筛选是什么都要显示出来
+        if filter != .all { filter = .all } else { applyFilter() }
+    }
+
+    /// 打开文件夹后要选中的照片
+    private var pendingSelect: URL?
+
+    /// - Parameter selecting: 打开后选中这张照片(从访达双击照片时)
+    func open(folder url: URL, selecting: URL? = nil) {
         _ = url.startAccessingSecurityScopedResource()
+        // 换了文件夹,上一个文件夹的缓存用不上了
+        if url.standardizedFileURL != folder?.standardizedFileURL { clearCaches() }
         folder = url
         scanTask?.cancel()
         scanTask = Task {
@@ -204,7 +256,13 @@ final class ImageStore: ObservableObject {
             picked = []
             rebuildRAWIndex()
             aspectCache = [:]
-            applyFilter()
+            pendingSelect = selecting
+            // 要选中的照片被当前的格式筛选挡住了(比如只看 JPG 时双击了一张 RAW):切到"全部"
+            if let selecting, !filter.matches(selecting), list.contains(selecting) {
+                filter = .all   // 会触发 applyFilter
+            } else {
+                applyFilter()
+            }
         }
     }
 
@@ -223,7 +281,8 @@ final class ImageStore: ObservableObject {
 
     /// 按当前筛选条件重建显示列表;当前照片还在列表里就保持选中它
     private func applyFilter() {
-        let keep = current
+        let keep = pendingSelect ?? current
+        pendingSelect = nil
         aspectTask?.cancel()
         aspectTask = nil
         pendingAspects = [:]
@@ -732,6 +791,12 @@ final class ImageStore: ObservableObject {
         }
     }
 
+    /// 清空图片缓存(缩略图和预取的主图)。换文件夹时用:上一个文件夹的缓存已经用不上了
+    func clearCaches() {
+        ThumbnailCache.shared.removeAll()
+        mainCache.removeAllObjects()
+    }
+
     /// 解码主图并写入缓存(已缓存则直接返回)
     private func decodeMain(_ url: URL) async -> NSImage? {
         if let hit = mainCache.object(forKey: url as NSURL) { return hit }
@@ -815,6 +880,7 @@ nonisolated enum ImageMeta {
         }
         if let v = (exif[kCGImagePropertyExifISOSpeedRatings] as? [Any])?.first { exp.append(MetaRow(name: "ISO", value: "\(v)")) }
         if let v = exif[kCGImagePropertyExifFocalLength] as? Double { exp.append(MetaRow(name: "焦距", value: String(format: "%.0f mm", v))) }
+        if let v = equivalentFocalLength(exif: exif, properties: p) { exp.append(MetaRow(name: "等效焦距", value: v)) }
         if let v = exif[kCGImagePropertyExifExposureBiasValue] as? Double { exp.append(MetaRow(name: "曝光补偿", value: String(format: "%+.1f EV", v))) }
         if let v = exif[kCGImagePropertyExifFlash] { exp.append(MetaRow(name: "闪光灯", value: "\(v)") ) }
         if !exp.isEmpty { sections.append(MetaSection(title: "曝光", rows: exp)) }
@@ -832,6 +898,36 @@ nonisolated enum ImageMeta {
         return sections
     }
 
+    /// 35mm 等效焦距。
+    /// 相机一般会直接把它写在照片里,有就用它;没有的话,用焦平面分辨率推算传感器尺寸,
+    /// 再按对角线和全画幅(43.27 mm)的比值换算,这种情况前面加"约"。都没有就不显示。
+    static func equivalentFocalLength(exif: [CFString: Any], properties: [CFString: Any]) -> String? {
+        if let recorded = exif[kCGImagePropertyExifFocalLenIn35mmFilm] as? Double, recorded > 0 {
+            return String(format: "%.0f mm", recorded)
+        }
+        guard let focal = exif[kCGImagePropertyExifFocalLength] as? Double, focal > 0,
+              let xRes = exif[kCGImagePropertyExifFocalPlaneXResolution] as? Double, xRes > 0,
+              let yRes = exif[kCGImagePropertyExifFocalPlaneYResolution] as? Double, yRes > 0 else { return nil }
+        // 焦平面分辨率的单位:2 英寸、3 厘米、4 毫米、5 微米;没写按英寸
+        let unitMM: Double
+        switch exif[kCGImagePropertyExifFocalPlaneResolutionUnit] as? Int ?? 2 {
+        case 3: unitMM = 10
+        case 4: unitMM = 1
+        case 5: unitMM = 0.001
+        default: unitMM = 25.4
+        }
+        // 这个分辨率对应的是相机记录的原始像素数,不一定等于文件现在的像素数(可能被缩小过)
+        guard let pixelsX = (exif[kCGImagePropertyExifPixelXDimension] ?? properties[kCGImagePropertyPixelWidth]) as? Double,
+              let pixelsY = (exif[kCGImagePropertyExifPixelYDimension] ?? properties[kCGImagePropertyPixelHeight]) as? Double,
+              pixelsX > 0, pixelsY > 0 else { return nil }
+        let sensorW = pixelsX / xRes * unitMM
+        let sensorH = pixelsY / yRes * unitMM
+        let diagonal = (sensorW * sensorW + sensorH * sensorH).squareRoot()
+        // 算出来的传感器小得或大得离谱,说明这些数据不可靠,宁可不显示
+        guard diagonal > 3, diagonal < 80 else { return nil }
+        return String(format: "约 %.0f mm", focal * 43.27 / diagonal)
+    }
+
     /// EXIF 里的时间是 "2024:05:01 12:34:56" 这种写法,转成和"修改时间"一致的本地格式。
     /// EXIF 时间不带时区,记录的就是相机上显示的时刻,所以按原样的时分秒显示,不做时区换算。
     static func formatEXIFDate(_ raw: String) -> String {
@@ -846,7 +942,6 @@ nonisolated enum ImageMeta {
 
     static func isRAW(_ url: URL) -> Bool { rawExts.contains(url.pathExtension.lowercased()) }
 
-    private static let ciContext = CIContext(options: [.cacheIntermediates: false])
 
     /// 用系统 RAW 引擎真正解码(而不是取内嵌 JPG 预览),并缩放到 maxPixel
     static func decodeRAW(_ url: URL, maxPixel: Int) -> CGImage? {
@@ -855,8 +950,10 @@ nonisolated enum ImageMeta {
         let longest = max(native.width, native.height)
         if longest > 0 { filter.scaleFactor = Float(min(1, CGFloat(maxPixel) / longest)) }
         guard let out = filter.outputImage else { return nil }
-        defer { ciContext.clearCaches() }   // RAW 解码的中间缓存很大,用完就清
-        return ciContext.createCGImage(out, from: out.extent)
+        // 每次解码临时建一个渲染环境,用完就释放。
+        // 长期留着一个的话,它自己会一直占着几十 MB(实测约 46 MB),而建一个的开销相比 RAW 解码可以忽略
+        let context = CIContext(options: [.cacheIntermediates: false])
+        return context.createCGImage(out, from: out.extent)
     }
 
     /// 宽高比(宽/高),只读文件头;考虑了 EXIF 旋转。读不到时按 3:2
@@ -952,7 +1049,8 @@ final class ThumbnailCache {
     nonisolated static let stripSize = 200
     /// 瀑布流用的几档尺寸(最长边像素)。按格子实际大小选一档,
     /// 分档是为了列数、窗口稍微变化时还能用上已缓存的图
-    nonisolated static let waterfallSizes = [320, 480, 720, 1080, 1600]
+    /// 档位分得细一些:档位太粗时,需要 500 像素的格子会取到 720 的图,内存是实际需要的两倍
+    nonisolated static let waterfallSizes = [320, 400, 480, 600, 720, 900, 1080, 1320, 1600]
 
     /// 能把 `pixels`(格子最长边的实际像素数)显示清楚的最小一档
     nonisolated static func waterfallSize(forPixels pixels: CGFloat) -> Int {
@@ -961,7 +1059,9 @@ final class ThumbnailCache {
 
     private let cache: NSCache<NSString, NSImage> = {
         let c = NSCache<NSString, NSImage>()
-        c.totalCostLimit = 256 * 1024 * 1024   // 约 256 MB 像素数据
+        // 约 128 MB 像素数据。屏幕上正在显示的图由格子自己拿着,不受这个上限影响;
+        // 这个上限只决定滚走之后还留多少张备用
+        c.totalCostLimit = 128 * 1024 * 1024
         return c
     }()
     /// 同时最多读几张。已经开始读的停不下来,所以不能太多:
@@ -971,6 +1071,9 @@ final class ThumbnailCache {
     private func key(_ url: URL, _ size: Int) -> NSString { "\(size)|\(url.path)" as NSString }
 
     func cached(_ url: URL, size: Int = stripSize) -> NSImage? { cache.object(forKey: key(url, size)) }
+
+    /// 清空缓存。屏幕上正在显示的图由各自的格子拿着,不受影响
+    func removeAll() { cache.removeAllObjects() }
 
     /// 已缓存的最清晰的一张(任何尺寸),用来占位
     func bestCached(_ url: URL) -> NSImage? {

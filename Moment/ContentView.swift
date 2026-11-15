@@ -17,38 +17,58 @@ struct ContentView: View {
     private var hasImages: Bool { !store.images.isEmpty }
     private let panelRadius: CGFloat = 16
 
+    /// 给工具栏控件用的绑定:读是即时的,写推到下一轮主线程循环。
+    ///
+    /// 工具栏里的 Picker / Toggle 会在界面刷新的过程中把新值写回来。
+    /// 而改模式、改筛选会连带更新 ImageStore 里的很多项(照片列表、选中项、主图、尺寸……),
+    /// 这些更新如果发生在刷新途中,SwiftUI 就会逐项警告"在界面更新过程中发布变化"。
+    private func deferred<Value>(_ keyPath: ReferenceWritableKeyPath<ImageStore, Value>) -> Binding<Value> {
+        Binding(
+            get: { store[keyPath: keyPath] },
+            set: { value in DispatchQueue.main.async { store[keyPath: keyPath] = value } }
+        )
+    }
+
     /// 执行一个快捷键操作;当前模式下不适用时返回 false
     private func perform(_ action: ShortcutAction) -> Bool {
+        // 先判断当前能不能做(要立即回答"这个键有没有被处理")
         switch action {
-        case .previous, .next:
-            // 普通模式下等同于 ← / →
+        case .previous, .next, .toggleStrip:
+            // 翻页在普通模式下等同于 ← / →;瀑布流模式本来就没有缩略图条
             guard store.mode == .single else { return false }
-            store.move(action == .previous ? -1 : 1)
-        case .toggleMode:
+        case .toggleMode, .toggleCulling, .togglePick:
             guard hasImages else { return false }
-            store.mode = store.mode == .single ? .waterfall : .single
-        case .toggleInfo:
-            showInfo.toggle()
-        case .toggleStrip:
-            // 瀑布流模式本来就没有缩略图条
-            guard store.mode == .single else { return false }
-            showStrip.toggle()
-        case .toggleCulling:
-            guard hasImages else { return false }
-            store.culling.toggle()
-        case .togglePick:
-            // 不在筛选模式时,先进入再标记:按一下就开始挑片
-            guard hasImages else { return false }
-            if !store.culling { store.culling = true }
-            store.togglePick()
         case .toggleFullScreen:
-            guard let window = NSApp.keyWindow else { return false }
-            window.toggleFullScreen(nil)
-        case .zoomIn: store.zoomRequests.send(1.25)
-        case .zoomOut: store.zoomRequests.send(0.8)
-        case .zoomReset: store.zoomRequests.send(0)
+            guard NSApp.keyWindow != nil else { return false }
+        case .toggleInfo, .zoomIn, .zoomOut, .zoomReset:
+            break
+        }
+        // 真正的改动推到下一轮:按键回调是在界面刷新的过程中被调用的,
+        // 在这里直接改 ImageStore 会触发"在界面更新过程中发布变化"的警告
+        afterUpdate {
+            switch action {
+            case .previous: store.move(-1)
+            case .next: store.move(1)
+            case .toggleMode: store.mode = store.mode == .single ? .waterfall : .single
+            case .toggleInfo: showInfo.toggle()
+            case .toggleStrip: showStrip.toggle()
+            case .toggleCulling: store.culling.toggle()
+            case .togglePick:
+                // 不在筛选模式时,先进入再标记:按一下就开始挑片
+                if !store.culling { store.culling = true }
+                store.togglePick()
+            case .toggleFullScreen: NSApp.keyWindow?.toggleFullScreen(nil)
+            case .zoomIn: store.zoomRequests.send(1.25)
+            case .zoomOut: store.zoomRequests.send(0.8)
+            case .zoomReset: store.zoomRequests.send(0)
+            }
         }
         return true
+    }
+
+    /// 等这一轮界面刷新结束后再执行
+    private func afterUpdate(_ work: @escaping () -> Void) {
+        DispatchQueue.main.async(execute: work)
     }
 
     /// 窗口内容。铺满整个窗口,包括工具栏后面;topInset 是工具栏占的高度
@@ -80,7 +100,10 @@ struct ContentView: View {
                 .overlay(alignment: .topLeading) {
                     if let hero = store.hero {
                         HeroOverlay(flight: hero) {
-                            if store.hero?.id == hero.id { store.hero = nil }
+                            // 动画的完成回调可能发生在界面刷新途中,推到下一轮再改
+                            DispatchQueue.main.async {
+                                if store.hero?.id == hero.id { store.hero = nil }
+                            }
                         }
                         .id(hero.id)
                         // 必须立即出现:否则会被模式切换的动画带上默认的淡入效果,
@@ -176,14 +199,14 @@ struct ContentView: View {
 
             // 中间:怎么看(模式、筛选;瀑布流时再加列数)
             ToolbarItemGroup(placement: .principal) {
-                Picker("显示模式", selection: $store.mode) {
+                Picker("显示模式", selection: deferred(\.mode)) {
                     Label("普通", systemImage: "photo").tag(ViewMode.single)
                     Label("瀑布流", systemImage: "square.grid.3x3").tag(ViewMode.waterfall)
                 }
                 .pickerStyle(.segmented)
                 .help("切换普通 / 瀑布流模式")
 
-                Picker("格式筛选", selection: $store.filter) {
+                Picker("格式筛选", selection: deferred(\.filter)) {
                     ForEach(FileFilter.allCases) { Text($0.rawValue).tag($0) }
                 }
                 .pickerStyle(.segmented)
@@ -211,7 +234,7 @@ struct ContentView: View {
 
             // 右侧:面板开关和外观(信息栏开关正好在信息栏上方)
             ToolbarItemGroup(placement: .primaryAction) {
-                Toggle(isOn: $store.culling) {
+                Toggle(isOn: deferred(\.culling)) {
                     Label("筛选模式", systemImage: "checkmark.circle")
                 }
                 .help(store.culling ? "退出筛选模式" : "筛选模式:标记照片,再复制或移动到别的文件夹")
@@ -256,7 +279,7 @@ struct ContentView: View {
         .onKeyPress(.escape) {
             // 筛选模式下,Esc 先退出筛选模式(全屏时也是先退这个,再按一次才退出全屏)
             if store.culling {
-                store.culling = false
+                afterUpdate { store.culling = false }
                 return .handled
             }
             // 全屏时按 Esc 退出全屏(主界面拿着键盘焦点,系统默认的这个行为到不了窗口)
@@ -267,7 +290,7 @@ struct ContentView: View {
         .onKeyPress(.return) {
             // 瀑布流里按回车打开当前选中的照片
             guard store.mode == .waterfall else { return .ignored }
-            store.mode = .single
+            afterUpdate { store.mode = .single }
             return .handled
         }
         // 可自定义的快捷键(在"设置"里修改),见 ShortcutStore
@@ -278,8 +301,8 @@ struct ContentView: View {
             if press.phase == .repeat, !action.repeats { return .handled }
             return perform(action) ? .handled : .ignored
         }
-        .onKeyPress(.leftArrow) { store.move(-1); return .handled }
-        .onKeyPress(.rightArrow) { store.move(1); return .handled }
+        .onKeyPress(.leftArrow) { afterUpdate { store.move(-1) }; return .handled }
+        .onKeyPress(.rightArrow) { afterUpdate { store.move(1) }; return .handled }
     }
 }
 
@@ -466,6 +489,8 @@ struct ThumbnailStrip: View {
     @State private var offsetX: CGFloat = 0
     @State private var viewWidth: CGFloat = 0
     @State private var wheel = WheelTarget()
+    /// 出现后还欠一次"居中到当前照片"
+    @State private var pendingCenter = true
 
     /// 连续滚轮时累计的目标位置(滚动位置的回报有延迟,连续几格要在上一格的目标上继续加)
     private final class WheelTarget {
@@ -489,7 +514,7 @@ struct ThumbnailStrip: View {
     /// 选中项变化后滚动缩略图条。
     /// 点击选中的:它本来就在眼前,只在被边缘挡住时挪到刚好露出,不重新居中(否则会跳一下)。
     /// 键盘翻页的:居中显示。
-    private func reveal(_ index: Int, minimal: Bool) {
+    private func reveal(_ index: Int, minimal: Bool, animated: Bool = true) {
         let left = 10 + CGFloat(index) * 92
         var x: CGFloat
         if !minimal {
@@ -502,7 +527,13 @@ struct ThumbnailStrip: View {
             return
         }
         x = min(max(x, 0), maxOffset)
-        withAnimation(.easeInOut(duration: 0.2)) { position.scrollTo(x: x) }
+        if animated {
+            withAnimation(.easeInOut(duration: 0.2)) { position.scrollTo(x: x) }
+        } else {
+            // 直接跳过去时先把要渲染的范围也挪过去,不用等滚动位置报回来
+            offsetX = x
+            position.scrollTo(x: x)
+        }
     }
 
     /// 内容总宽度:每格 84、间距 8、两端各留 10。直接算出来,比懒加载列表的估算值准
@@ -511,25 +542,36 @@ struct ThumbnailStrip: View {
         return n * 84 + max(n - 1, 0) * 8 + 20
     }
 
+    /// 当前要渲染的格子:屏幕内的,加上左右各多出几格。
+    /// 系统的懒加载列表会把滚过的格子(连同它们的图片和图层)一直留着,滚得越多占得越多;
+    /// 这里自己算范围,滚走的格子直接销毁,内存只和屏幕上有几格有关
+    private var visibleRange: Range<Int> {
+        let count = store.images.count
+        guard count > 0 else { return 0..<0 }
+        let width = viewWidth > 0 ? viewWidth : 1600   // 还没量到宽度时先按一屏估
+        let first = Int(((offsetX - 10) / 92).rounded(.down)) - 4
+        let last = Int(((offsetX + width - 10) / 92).rounded(.up)) + 4
+        let lower = min(max(first, 0), count)
+        return lower..<min(max(last, lower), count)
+    }
+
     var body: some View {
-        ScrollViewReader { proxy in
             ScrollView(.horizontal) {
-                LazyHStack(spacing: 8) {
-                    ForEach(store.images.indices, id: \.self) { index in
+                ZStack(alignment: .topLeading) {
+                    ForEach(visibleRange, id: \.self) { index in
                         ThumbnailCell(url: store.images[index],
                                       picked: store.picked.contains(store.images[index]),
                                       selected: store.selected.contains(index),
                                       current: index == store.selection)
-                            .id(index)
                             .onTapGesture {
                                 let flags = NSEvent.modifierFlags
                                 store.click(index, shift: flags.contains(.shift), command: flags.contains(.command))
                             }
                             .contextMenu { PhotoContextMenu(index: index) }
+                            .offset(x: 10 + CGFloat(index) * 92, y: 8)
                     }
                 }
-                .padding(.horizontal, 10)
-                .padding(.top, 8)
+                .frame(width: contentWidth, alignment: .topLeading)
                 .frame(maxHeight: .infinity, alignment: .top)
             }
             // 系统滚动条(接了鼠标时是又粗又带底槽的那种)藏起来,换成下面自己画的细滚动条
@@ -539,6 +581,11 @@ struct ThumbnailStrip: View {
             .onScrollGeometryChange(for: [CGFloat].self) { [$0.contentOffset.x, $0.containerSize.width] } action: { _, v in
                 offsetX = v[0]
                 viewWidth = v[1]
+                // 刚出现时还不知道宽度,没法居中;量到宽度后补上
+                if pendingCenter, v[1] > 0 {
+                    pendingCenter = false
+                    reveal(store.selection, minimal: false, animated: false)
+                }
             }
             .overlay(alignment: .bottom) {
                 SlimScrollbar(offset: offsetX, contentLength: contentWidth, viewLength: viewWidth) { x in
@@ -550,14 +597,15 @@ struct ThumbnailStrip: View {
             .background(WheelCatcher(verticalOnly: true) { dy, precise, _ in
                 wheelScroll(dy: dy, precise: precise)
             })
-            // 从瀑布流切回来时,直接定位到当前照片
-            .onAppear { proxy.scrollTo(store.selection, anchor: .center) }
+            // 从瀑布流切回来时,直接定位到当前照片(宽度量到之后执行,见上面)
+            .onAppear { pendingCenter = true }
             // 切换筛选后列表整体换了,即使选中的序号没变也要重新定位
-            .onChange(of: store.listVersion) { proxy.scrollTo(store.selection, anchor: .center) }
+            .onChange(of: store.listVersion) {
+                if viewWidth > 0 { reveal(store.selection, minimal: false, animated: false) } else { pendingCenter = true }
+            }
             .onChange(of: store.selection) { _, new in
                 reveal(new, minimal: store.selectionByClick)
             }
-        }
     }
 }
 
