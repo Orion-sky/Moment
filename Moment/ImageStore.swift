@@ -226,6 +226,7 @@ final class ImageStore: ObservableObject {
     /// 只显示指定的几个文件(没有所在文件夹的权限时)
     private func openOnly(files: [URL]) {
         scanTask?.cancel()
+        stopWatching()
         folder = nil
         allImages = files
             .filter { !$0.hasDirectoryPath }
@@ -238,6 +239,60 @@ final class ImageStore: ObservableObject {
         if filter != .all { filter = .all } else { applyFilter() }
     }
 
+    // MARK: 监视文件夹的变化
+
+    /// 文件夹内容在应用之外被改动(在访达里删除、移走、拷进新照片,或者存储卡被拔掉)时,
+    /// 列表要跟着更新。否则已经不存在的照片还留着缩略图,点上去却什么也打不开
+    private var folderMonitor: DispatchSourceFileSystemObject?
+    private var refreshTask: Task<Void, Never>?
+
+    private func watch(_ url: URL) {
+        stopWatching()
+        let descriptor = Darwin.open(url.path, O_EVTONLY)
+        guard descriptor >= 0 else { return }
+        let source = DispatchSource.makeFileSystemObjectSource(
+            fileDescriptor: descriptor, eventMask: [.write, .delete, .rename], queue: .main)
+        source.setEventHandler { [weak self] in
+            MainActor.assumeIsolated { self?.scheduleRefresh() }
+        }
+        source.setCancelHandler { close(descriptor) }
+        source.resume()
+        folderMonitor = source
+    }
+
+    private func stopWatching() {
+        folderMonitor?.cancel()
+        folderMonitor = nil
+        refreshTask?.cancel()
+    }
+
+    /// 变化往往是一连串的(比如拷进一批照片),等它停下来再重新扫描一次
+    private func scheduleRefresh() {
+        refreshTask?.cancel()
+        refreshTask = Task {
+            try? await Task.sleep(for: .milliseconds(600))
+            guard !Task.isCancelled, let folder else { return }
+            // 应用自己正在复制 / 移动 / 删除时不插手,那边结束后会自己更新列表
+            guard transfer == nil else { scheduleRefresh(); return }
+            let list = await Task.detached(priority: .utility) { Self.scan(folder) }.value
+            guard !Task.isCancelled, folder == self.folder, list != allImages else { return }
+
+            let before = Set(allImages)
+            let after = Set(list)
+            let removed = before.subtracting(after).count
+            let added = after.subtracting(before).count
+            allImages = list
+            picked.formIntersection(after)
+            rebuildRAWIndex()
+            applyFilter()   // 当前照片还在就保持选中它,不在了就停在文件名相邻的那张
+
+            var parts: [String] = []
+            if removed > 0 { parts.append("\(removed) 张照片已被删除或移走") }
+            if added > 0 { parts.append("新增 \(added) 张照片") }
+            if !parts.isEmpty { edgeNotice = EdgeNotice(text: parts.joined(separator: ","), duration: 3.5) }
+        }
+    }
+
     /// 打开文件夹后要选中的照片
     private var pendingSelect: URL?
 
@@ -247,6 +302,7 @@ final class ImageStore: ObservableObject {
         // 换了文件夹,上一个文件夹的缓存用不上了
         if url.standardizedFileURL != folder?.standardizedFileURL { clearCaches() }
         folder = url
+        watch(url)
         scanTask?.cancel()
         scanTask = Task {
             // 扫描与排序放到后台线程
@@ -321,6 +377,8 @@ final class ImageStore: ObservableObject {
     struct EdgeNotice: Identifiable, Equatable {
         let id = UUID()
         let text: String
+        /// 显示多久(秒)
+        var duration: Double = 1.2
     }
 
     /// 最近一次选中项变化是不是鼠标点出来的(缩略图条据此决定要不要重新居中)。不触发刷新

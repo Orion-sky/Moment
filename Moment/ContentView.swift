@@ -136,9 +136,9 @@ struct ContentView: View {
                             .padding(.top, topInset)
                             .allowsHitTesting(false)
                             .transition(.opacity.combined(with: .scale(scale: 0.92)))
-                            // 每次提示(包括按住不放连续触发)都重新计时,1.2 秒后消失
+                            // 每次提示(包括按住不放连续触发)都重新计时,到时间后消失
                             .task(id: notice.id) {
-                                try? await Task.sleep(for: .seconds(1.2))
+                                try? await Task.sleep(for: .seconds(notice.duration))
                                 if !Task.isCancelled, store.edgeNotice?.id == notice.id { store.edgeNotice = nil }
                             }
                     }
