@@ -1,0 +1,10 @@
+# macOS
+.DS_Store
+
+# Xcode 的个人设置和构建产物
+xcuserdata/
+DerivedData/
+build/
+
+# 从 Xcode 导出的应用(文件夹名是 "Moment 日期 时间")
+/Moment 20*/
