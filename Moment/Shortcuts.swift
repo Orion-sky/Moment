@@ -325,6 +325,7 @@ private struct FixedKeysSettings: View {
 
             Section("菜单快捷键") {
                 LabeledContent("打开文件夹", value: "⌘O")
+                LabeledContent("拷贝选中的照片", value: "⌘C")
                 LabeledContent("普通模式 / 瀑布流模式", value: "⌘1 / ⌘2")
                 LabeledContent("放大 / 缩小 / 适应窗口", value: "⌘+ / ⌘- / ⌘0")
                 LabeledContent("开关缩略图条 / 信息栏", value: "⌥⌘T / ⌥⌘I")

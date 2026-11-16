@@ -69,6 +69,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 Button("打开文件夹…") { store.chooseFolder() }
                     .keyboardShortcut("o")
             }
+            // 应用里没有文字输入,编辑菜单的剪切 / 拷贝 / 粘贴换成拷贝照片
+            CommandGroup(replacing: .pasteboard) {
+                Button(store.selected.count > 1 ? "拷贝 \(store.selected.count) 张照片" : "拷贝照片") {
+                    store.copyToPasteboard(store.selected)
+                }
+                .keyboardShortcut("c")
+                .disabled(store.selected.isEmpty)
+            }
             CommandGroup(before: .toolbar) {
                 Picker("外观", selection: $appearance) {
                     ForEach(AppAppearance.allCases) { Text($0.title).tag($0) }
