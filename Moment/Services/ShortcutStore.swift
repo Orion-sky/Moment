@@ -29,7 +29,7 @@ enum ShortcutAction: String, CaseIterable, Identifiable {
         case .previous: "a"
         case .next: "d"
         case .toggleMode: "v"
-        case .toggleInfo: "w"
+        case .toggleInfo: "x"
         case .toggleStrip: "s"
         case .zoomIn: "="
         case .zoomOut: "-"
