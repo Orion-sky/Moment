@@ -280,7 +280,7 @@ private struct ShortcutSettings: View {
                     }
                 }
             } footer: {
-                Text("点击右侧的按钮,再按下想用的键。可以用字母、数字、符号和空格;这个键已经被别的操作使用时,两者会互换。按 Esc 取消。")
+                Text("瀑布流里 W A S D 固定用来上下左右移动,这四个键上的操作只在普通模式下起作用。点击右侧的按钮,再按下想用的键。可以用字母、数字、符号和空格;这个键已经被别的操作使用时,两者会互换。按 Esc 取消。")
                     .foregroundStyle(.secondary)
             }
 
@@ -315,6 +315,7 @@ private struct FixedKeysSettings: View {
         Form {
             Section {
                 LabeledContent("上一张 / 下一张", value: "← / →")
+                LabeledContent("瀑布流里上下左右移动", value: "W A S D 或 方向键")
                 LabeledContent("瀑布流里打开选中的照片", value: "回车 或 双击")
                 LabeledContent("退出筛选模式;不在筛选模式时退出全屏", value: "Esc")
                 LabeledContent("瀑布流里调整每行张数", value: "⌘ + 滚轮")

@@ -297,14 +297,37 @@ struct ContentView: View {
         }
         // 可自定义的快捷键(在"设置"里修改),见 ShortcutStore
         .onKeyPress(phases: [.down, .repeat]) { press in
-            guard let key = ShortcutStore.normalize(press),
-                  let action = shortcuts.action(for: key) else { return .ignored }
+            guard let key = ShortcutStore.normalize(press) else { return .ignored }
+            // 瀑布流里 W A S D 固定用来上下左右移动选中的照片,优先于自定义的快捷键
+            if store.mode == .waterfall, hasImages,
+               let direction: ImageStore.GridDirection = ["w": .up, "a": .left, "s": .down, "d": .right][key] {
+                afterUpdate { store.moveInGrid(direction) }
+                return .handled
+            }
+            guard let action = shortcuts.action(for: key) else { return .ignored }
             // 开关类的操作按住不放时不重复触发
             if press.phase == .repeat, !action.repeats { return .handled }
             return perform(action) ? .handled : .ignored
         }
-        .onKeyPress(.leftArrow) { afterUpdate { store.move(-1) }; return .handled }
-        .onKeyPress(.rightArrow) { afterUpdate { store.move(1) }; return .handled }
+        // 方向键:普通模式是上一张 / 下一张,瀑布流里是按方向移动
+        .onKeyPress(.leftArrow) {
+            afterUpdate { if store.mode == .waterfall { store.moveInGrid(.left) } else { store.move(-1) } }
+            return .handled
+        }
+        .onKeyPress(.rightArrow) {
+            afterUpdate { if store.mode == .waterfall { store.moveInGrid(.right) } else { store.move(1) } }
+            return .handled
+        }
+        .onKeyPress(.upArrow) {
+            guard store.mode == .waterfall else { return .ignored }
+            afterUpdate { store.moveInGrid(.up) }
+            return .handled
+        }
+        .onKeyPress(.downArrow) {
+            guard store.mode == .waterfall else { return .ignored }
+            afterUpdate { store.moveInGrid(.down) }
+            return .handled
+        }
     }
 }
 
@@ -674,6 +697,8 @@ struct PhotoContextMenu: View {
         let targets = store.targets(forContextAt: index)
         Button(targets.count > 1 ? "拷贝 \(targets.count) 张照片" : "拷贝") { store.copyToPasteboard(targets) }
         Divider()
+        // 只是不再显示,文件不动
+        Button(targets.count > 1 ? "从列表中移除 \(targets.count) 张照片" : "从列表中移除") { store.removeFromList(targets) }
         Button(targets.count > 1 ? "将 \(targets.count) 张照片移到废纸篓" : "移到废纸篓",
                role: .destructive) { store.trash(targets) }
         // 这些照片里有同名 RAW 时才出现

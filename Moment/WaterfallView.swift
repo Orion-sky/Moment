@@ -231,6 +231,7 @@ struct WaterfallView: View {
 
     /// 把选中照片此刻在屏幕上的位置告诉 store,切回普通模式时衔接动画从这里起飞
     private func reportSelectionRect(_ frames: [CGRect], offset: CGFloat) {
+        store.waterfallFrames = frames
         store.waterfallSelectionRect = frames.indices.contains(store.selection)
             ? frames[store.selection].offsetBy(dx: 0, dy: -offset) : nil
     }

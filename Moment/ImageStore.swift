@@ -121,6 +121,7 @@ final class ImageStore: ObservableObject {
     var trailingInset: CGFloat = 0             // 其中右侧被信息栏盖住的宽度
     var topInset: CGFloat = 0                  // 其中顶部被工具栏盖住的高度
     var stripExtraHeight: CGFloat = 0          // 普通模式下缩略图条占掉的高度
+    var waterfallFrames: [CGRect] = []         // 瀑布流此刻的排版(每张照片的位置),按方向移动选中项时用
     var waterfallSelectionRect: CGRect?        // 选中的照片此刻在瀑布流里的位置
 
     private func startHero(from old: ViewMode) {
@@ -227,6 +228,7 @@ final class ImageStore: ObservableObject {
     private func openOnly(files: [URL]) {
         scanTask?.cancel()
         stopWatching()
+        hiddenFiles = []
         folder = nil
         allImages = files
             .filter { !$0.hasDirectoryPath }
@@ -274,7 +276,9 @@ final class ImageStore: ObservableObject {
             guard !Task.isCancelled, let folder else { return }
             // 应用自己正在复制 / 移动 / 删除时不插手,那边结束后会自己更新列表
             guard transfer == nil else { scheduleRefresh(); return }
-            let list = await Task.detached(priority: .utility) { Self.scan(folder) }.value
+            let scanned = await Task.detached(priority: .utility) { Self.scan(folder) }.value
+            // 从列表里移除的照片不要因为重新扫描又回来
+            let list = hiddenFiles.isEmpty ? scanned : scanned.filter { !hiddenFiles.contains($0) }
             guard !Task.isCancelled, folder == self.folder, list != allImages else { return }
 
             let before = Set(allImages)
@@ -302,6 +306,7 @@ final class ImageStore: ObservableObject {
         // 换了文件夹,上一个文件夹的缓存用不上了
         if url.standardizedFileURL != folder?.standardizedFileURL { clearCaches() }
         folder = url
+        hiddenFiles = []
         watch(url)
         scanTask?.cancel()
         scanTask = Task {
@@ -397,6 +402,49 @@ final class ImageStore: ObservableObject {
         anchor = selection
     }
 
+    enum GridDirection { case up, down, left, right }
+
+    /// 瀑布流里按方向移动选中项:上下是同一列里相邻的那张,左右是相邻一列里高度最接近的那张
+    func moveInGrid(_ direction: GridDirection) {
+        let frames = waterfallFrames
+        guard frames.count == images.count, frames.indices.contains(selection) else { return }
+        let current = frames[selection]
+        var target: Int?
+        switch direction {
+        case .up, .down:
+            // 同一列里的照片是按序号从上往下排的
+            let column = frames.indices.filter { abs(frames[$0].minX - current.minX) < 0.5 }
+            if let place = column.firstIndex(of: selection) {
+                let next = place + (direction == .up ? -1 : 1)
+                if column.indices.contains(next) { target = column[next] }
+            }
+        case .left, .right:
+            let x = current.minX + (current.width + WaterfallLayout.spacing) * (direction == .left ? -1 : 1)
+            var best = CGFloat.infinity
+            for i in frames.indices where abs(frames[i].minX - x) < 0.5 {
+                // 和当前照片的中线有多远;中线落在它里面就是 0
+                let f = frames[i]
+                let distance = max(f.minY - current.midY, current.midY - f.maxY, 0)
+                if distance < best { best = distance; target = i }
+            }
+        }
+        selectionByClick = false
+        guard let target else {
+            let text = switch direction {
+            case .up: "已经是最上面一张"
+            case .down: "已经是最下面一张"
+            case .left: "已经是最左边一列"
+            case .right: "已经是最右边一列"
+            }
+            edgeNotice = EdgeNotice(text: text)
+            return
+        }
+        if edgeNotice != nil { edgeNotice = nil }
+        selection = target
+        selected = [target]
+        anchor = target
+    }
+
     /// 点击缩略图:普通点击单选,Shift 连选一段,Command 逐个加减
     func click(_ index: Int, shift: Bool, command: Bool) {
         guard images.indices.contains(index) else { return }
@@ -459,7 +507,19 @@ final class ImageStore: ObservableObject {
         dropFromLists(Set(removed.map { images[$0] }).union(removedHidden))
     }
 
-    /// 这些文件已经不在文件夹里了(删除或移走):从各个列表里去掉,并停在原位置附近
+    /// 从列表里移除的照片:只是不再显示,文件还在原处。重新打开文件夹后恢复
+    private var hiddenFiles: Set<URL> = []
+
+    /// 把指定照片从列表里移除(不删除文件)
+    func removeFromList(_ indices: Set<Int>) {
+        let files = Set(urls(at: indices))
+        guard !files.isEmpty else { return }
+        hiddenFiles.formUnion(files)
+        dropFromLists(files)
+        edgeNotice = EdgeNotice(text: "已从列表中移除 \(files.count) 张照片,文件仍在原处", duration: 2.5)
+    }
+
+    /// 这些文件不再显示了(删除、移走或从列表里移除):从各个列表里去掉,并停在原位置附近
     private func dropFromLists(_ urls: Set<URL>) {
         guard !urls.isEmpty else { return }
         // 序号会变,攒着的尺寸是按序号记的,先用上
