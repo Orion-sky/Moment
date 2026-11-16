@@ -64,6 +64,18 @@ struct GeneralSettings: View {
         }
     }
 
+    /// 授权的文件夹最多直接列出几行,再多就滚动
+    private static let visibleFolderRows = 4
+    private static let folderRowHeight: CGFloat = 36
+
+    private func folderRow(_ folder: URL) -> some View {
+        LabeledContent {
+            Button("移除") { access.remove(folder) }
+        } label: {
+            Text(folder.path).lineLimit(1).truncationMode(.middle).help(folder.path)
+        }
+    }
+
     var body: some View {
         Form {
             Section {
@@ -85,12 +97,19 @@ struct GeneralSettings: View {
                 if access.folders.isEmpty {
                     Text("还没有授权任何文件夹").foregroundStyle(.secondary)
                 }
-                ForEach(access.folders, id: \.self) { folder in
-                    LabeledContent {
-                        Button("移除") { access.remove(folder) }
-                    } label: {
-                        Text(folder.path).lineLimit(1).truncationMode(.middle).help(folder.path)
+                if access.folders.count <= Self.visibleFolderRows {
+                    ForEach(access.folders, id: \.self) { folderRow($0) }
+                } else {
+                    // 文件夹多了就在固定高度里滚动,不让设置窗口被撑得很长
+                    ScrollView(.vertical) {
+                        VStack(spacing: 0) {
+                            ForEach(access.folders, id: \.self) { folder in
+                                folderRow(folder).frame(height: Self.folderRowHeight)
+                                if folder != access.folders.last { Divider() }
+                            }
+                        }
                     }
+                    .frame(height: Self.folderRowHeight * CGFloat(Self.visibleFolderRows))
                 }
                 Button("添加文件夹…") { access.addByAsking() }
             } header: {
