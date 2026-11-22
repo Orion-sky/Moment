@@ -69,10 +69,11 @@ struct GeneralSettings: View {
     private static let folderRowHeight: CGFloat = 36
 
     private func folderRow(_ folder: URL) -> some View {
-        LabeledContent {
-            Button("移除") { access.remove(folder) }
-        } label: {
+        // 不用 LabeledContent:它只有直接放在表单里才会左右分开,放进滚动区域后会整行挤在中间
+        HStack {
             Text(folder.path).lineLimit(1).truncationMode(.middle).help(folder.path)
+            Spacer(minLength: 12)
+            Button("移除") { access.remove(folder) }
         }
     }
 
