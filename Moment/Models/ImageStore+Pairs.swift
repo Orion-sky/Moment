@@ -65,6 +65,15 @@ extension ImageStore {
         }
     }
 
+    /// 分享(隔空投送、信息、邮件等)要发送的照片:
+    /// 筛选模式下是标记的照片(按操作条上的勾选带上同名文件),否则是选中的照片
+    var shareFiles: [URL] {
+        guard culling else { return urls(at: selected) }
+        let includePairs = UserDefaults.standard.bool(forKey: "cullingIncludeRAW")
+        let files = includePairs ? Array(picked) + pickedPairs : Array(picked)
+        return files.sorted { $0.lastPathComponent.localizedStandardCompare($1.lastPathComponent) == .orderedAscending }
+    }
+
     func revealInFinder(_ indices: Set<Int>) {
         #if os(macOS)
         NSWorkspace.shared.activateFileViewerSelecting(indices.sorted().compactMap { images.indices.contains($0) ? images[$0] : nil })

@@ -68,6 +68,14 @@ struct ContentView: View {
         return true
     }
 
+    private var shareHelp: String {
+        if store.culling {
+            return store.picked.isEmpty ? "分享:先标记要分享的照片" : "分享标记的 \(store.picked.count) 张照片(隔空投送、信息、邮件等)"
+        }
+        return store.selected.count > 1 ? "分享选中的 \(store.selected.count) 张照片(隔空投送、信息、邮件等)"
+                                        : "分享当前照片(隔空投送、信息、邮件等)"
+    }
+
     /// 等这一轮界面刷新结束后再执行
     private func afterUpdate(_ work: @escaping () -> Void) {
         DispatchQueue.main.async(execute: work)
@@ -236,6 +244,14 @@ struct ContentView: View {
 
             // 右侧:面板开关和外观(信息栏开关正好在信息栏上方)
             ToolbarItemGroup(placement: .primaryAction) {
+                // 系统的分享菜单:隔空投送、信息、邮件、备忘录等都在里面
+                let shareFiles = store.shareFiles
+                ShareLink(items: shareFiles) {
+                    Label("分享", systemImage: "square.and.arrow.up")
+                }
+                .help(shareHelp)
+                .disabled(shareFiles.isEmpty)
+
                 Toggle(isOn: deferred(\.culling)) {
                     Label("筛选模式", systemImage: "checkmark.circle")
                 }
