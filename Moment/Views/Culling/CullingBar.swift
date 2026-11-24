@@ -6,6 +6,7 @@ struct CullingBar: View {
     @EnvironmentObject var store: ImageStore
     @AppStorage("cullingIncludeRAW") private var includePairs = false
     @State private var confirmingDelete = false
+    @State private var convertingToHEIF = false
 
     var body: some View {
         let count = store.picked.count
@@ -47,6 +48,9 @@ struct CullingBar: View {
                     .disabled(count == 0)
                 Button("移动到…") { store.transferPicked(.move, includePairs: includePairs && !pairs.isEmpty) }
                     .disabled(count == 0)
+                Button("转换为 HEIF…") { convertingToHEIF = true }
+                    .disabled(count == 0)
+                    .help("把标记的照片转换为 HEIF 保存到别的文件夹,原文件不动")
 
                 Divider().frame(height: 16)
 
@@ -72,5 +76,6 @@ struct CullingBar: View {
         } message: {
             Text("可以在废纸篓里恢复。")
         }
+        .sheet(isPresented: $convertingToHEIF) { HEIFExportSheet().environmentObject(store) }
     }
 }

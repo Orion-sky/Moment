@@ -141,4 +141,92 @@ extension ImageStore {
         }
         #endif
     }
+
+    // MARK: 转换为 HEIF
+
+    private static let heifFolderKey = "heifExportFolderBookmark"
+
+    /// 上次转换 HEIF 时保存到的文件夹(存成书签,沙盒下重启后也能直接用)
+    var lastHEIFFolder: URL? {
+        guard let data = UserDefaults.standard.data(forKey: Self.heifFolderKey) else { return nil }
+        var stale = false
+        guard let url = try? URL(resolvingBookmarkData: data, options: .withSecurityScope,
+                                 relativeTo: nil, bookmarkDataIsStale: &stale),
+              FileManager.default.fileExists(atPath: url.path) else { return nil }
+        return url
+    }
+
+    /// 选择 HEIF 的保存位置;选好后记下来,下次默认还是它
+    func chooseHEIFFolder(startingAt current: URL?) -> URL? {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.canCreateDirectories = true
+        panel.allowsMultipleSelection = false
+        panel.directoryURL = current ?? folder
+        panel.prompt = "选择"
+        panel.message = "选择转换后的 HEIF 文件保存到哪个文件夹"
+        guard panel.runModal() == .OK, let url = panel.url else { return nil }
+        if let data = try? url.bookmarkData(options: .withSecurityScope) {
+            UserDefaults.standard.set(data, forKey: Self.heifFolderKey)
+        }
+        return url
+    }
+
+    /// 把标记的照片转换成 HEIF 保存到 destination。原文件不动;目标位置有同名文件时自动改名,不覆盖
+    /// - Parameter quality: 画质,0~1
+    func convertPickedToHEIF(to destination: URL, quality: Double) {
+        guard transfer == nil, !picked.isEmpty else { return }
+        let sources = allImages.filter(picked.contains)
+        guard !sources.isEmpty else { return }
+        let scoped = destination.startAccessingSecurityScopedResource()
+
+        transfer = TransferProgress(verb: "转换", done: 0, total: sources.count)
+        Task {
+            var taken: Set<String> = []
+            var converted = 0
+            var sizeBefore: Int64 = 0, sizeAfter: Int64 = 0
+            var failures: [String] = []
+            for source in sources {
+                let target = HEIFConverter.uniqueTarget(for: source, in: destination, taken: &taken)
+                // 解码和压缩都放到后台线程;一张一张来,RAW 全尺寸解码很占内存
+                let result = await Task.detached(priority: .userInitiated) { () -> Result<(Int64, Int64), Error> in
+                    do {
+                        try HEIFConverter.convert(source, to: target, quality: quality)
+                        func size(_ url: URL) -> Int64 {
+                            ((try? FileManager.default.attributesOfItem(atPath: url.path)[.size]) as? NSNumber)?.int64Value ?? 0
+                        }
+                        return .success((size(source), size(target)))
+                    } catch {
+                        return .failure(error)
+                    }
+                }.value
+                switch result {
+                case .success(let (before, after)):
+                    converted += 1
+                    sizeBefore += before
+                    sizeAfter += after
+                case .failure(let error):
+                    failures.append("\(source.lastPathComponent):\(error.localizedDescription)")
+                }
+                transfer?.done += 1
+            }
+            if scoped { destination.stopAccessingSecurityScopedResource() }
+            transfer = nil
+
+            let formatter = ByteCountFormatter()
+            formatter.countStyle = .file
+            var lines = ["已转换 \(converted) 张照片到「\(destination.lastPathComponent)」。"]
+            if converted > 0, sizeBefore > 0 {
+                let percent = Int((Double(sizeAfter) / Double(sizeBefore) * 100).rounded())
+                lines.append("原文件共 \(formatter.string(fromByteCount: sizeBefore)),"
+                             + "转换后 \(formatter.string(fromByteCount: sizeAfter)),约为原来的 \(percent)%。")
+            }
+            if !failures.isEmpty {
+                lines.append("\(failures.count) 张失败:\n" + failures.prefix(5).joined(separator: "\n"))
+            }
+            alertTitle = failures.isEmpty ? "转换完成" : "转换未全部完成"
+            errorMessage = lines.joined(separator: "\n\n")
+        }
+    }
 }
