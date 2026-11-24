@@ -295,9 +295,17 @@ struct ContentView: View {
         }
         .onChange(of: store.selection) { keyFocus = true }
         .onKeyPress(.escape) {
-            // 筛选模式下,Esc 先退出筛选模式(全屏时也是先退这个,再按一次才退出全屏)
+            // Esc 一层一层退:先退出筛选模式,再清除留下的标记,最后才退出全屏
             if store.culling {
                 afterUpdate { store.culling = false }
+                return .handled
+            }
+            if !store.picked.isEmpty {
+                afterUpdate {
+                    let count = store.picked.count
+                    store.clearPicks()
+                    store.edgeNotice = ImageStore.EdgeNotice(text: "已清除 \(count) 个标记", duration: 1.8)
+                }
                 return .handled
             }
             // 全屏时按 Esc 退出全屏(主界面拿着键盘焦点,系统默认的这个行为到不了窗口)

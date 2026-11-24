@@ -10,7 +10,7 @@ struct FixedKeysSettings: View {
                 LabeledContent("上一张 / 下一张", value: "← / →")
                 LabeledContent("瀑布流里上下左右移动", value: "W A S D 或 方向键")
                 LabeledContent("瀑布流里打开选中的照片", value: "回车 或 双击")
-                LabeledContent("退出筛选模式;不在筛选模式时退出全屏", value: "Esc")
+                LabeledContent("依次:退出筛选模式 → 清除标记 → 退出全屏", value: "Esc")
                 LabeledContent("瀑布流里调整每行张数", value: "⌘ + 滚轮")
                 LabeledContent("多选", value: "Shift / ⌘ + 点击")
             } header: {
