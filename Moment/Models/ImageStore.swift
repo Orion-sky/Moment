@@ -229,12 +229,15 @@ final class ImageStore: ObservableObject {
 
     /// 打开文件夹后要选中的照片
     private var pendingSelect: URL?
+    /// 下一次重建列表时从第一张开始,不沿用上一个列表里选中的位置(换了文件夹时)
+    private var selectFirst = false
 
     /// - Parameter selecting: 打开后选中这张照片(从访达双击照片时)
     func open(folder url: URL, selecting: URL? = nil) {
         _ = url.startAccessingSecurityScopedResource()
         // 换了文件夹,上一个文件夹的缓存用不上了
-        if url.standardizedFileURL != folder?.standardizedFileURL { clearCaches() }
+        let isNewFolder = url.standardizedFileURL != folder?.standardizedFileURL
+        if isNewFolder { clearCaches() }
         folder = url
         hiddenFiles = []
         watch(url)
@@ -248,6 +251,9 @@ final class ImageStore: ObservableObject {
             rebuildRAWIndex()
             aspectCache = [:]
             pendingSelect = selecting
+            // 换了文件夹就从第一张开始。否则会按文件名去找和上一个文件夹里选中那张最接近的,
+            // 比如上一个文件夹停在最后一张,新文件夹也会从最后一张开始。重新打开同一个文件夹时保持原位
+            selectFirst = isNewFolder
             // 要选中的照片被当前的格式筛选挡住了(比如只看 JPG 时双击了一张 RAW):切到"全部"
             if let selecting, !filter.matches(selecting), list.contains(selecting) {
                 filter = .all   // 会触发 applyFilter
@@ -272,8 +278,9 @@ final class ImageStore: ObservableObject {
 
     /// 按当前筛选条件重建显示列表;当前照片还在列表里就保持选中它
     private func applyFilter() {
-        let keep = pendingSelect ?? current
+        let keep = pendingSelect ?? (selectFirst ? nil : current)
         pendingSelect = nil
+        selectFirst = false
         aspectTask?.cancel()
         aspectTask = nil
         pendingAspects = [:]
