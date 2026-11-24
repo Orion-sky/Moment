@@ -332,39 +332,40 @@ final class ImageStore: ObservableObject {
         anchor = selection
     }
 
-    enum GridDirection { case up, down, left, right }
+    nonisolated enum GridDirection { case up, down, left, right }
 
-    /// 瀑布流里按方向移动选中项:上下是同一列里相邻的那张,左右是相邻一列里高度最接近的那张
+    /// 瀑布流里按方向移动选中项。
+    /// 上下是同一列里相邻的那张;左右按"阅读顺序"(见 `readingOrder`)走到前一张 / 后一张,
+    /// 走到一行的末尾会自动换到下一行的开头
     func moveInGrid(_ direction: GridDirection) {
         let frames = waterfallFrames
         guard frames.count == images.count, frames.indices.contains(selection) else { return }
-        let current = frames[selection]
         var target: Int?
         switch direction {
         case .up, .down:
             // 同一列里的照片是按序号从上往下排的
-            let column = frames.indices.filter { abs(frames[$0].minX - current.minX) < 0.5 }
+            let column = frames.indices.filter { abs(frames[$0].minX - frames[selection].minX) < 0.5 }
             if let place = column.firstIndex(of: selection) {
                 let next = place + (direction == .up ? -1 : 1)
                 if column.indices.contains(next) { target = column[next] }
             }
+            // 最后一行参差不齐:这一列下面已经没有照片时,往下直接跳到最后一张
+            if direction == .down, target == nil, let last = Self.readingOrder(frames).last, last != selection {
+                target = last
+            }
         case .left, .right:
-            let x = current.minX + (current.width + WaterfallLayout.spacing) * (direction == .left ? -1 : 1)
-            var best = CGFloat.infinity
-            for i in frames.indices where abs(frames[i].minX - x) < 0.5 {
-                // 和当前照片的中线有多远;中线落在它里面就是 0
-                let f = frames[i]
-                let distance = max(f.minY - current.midY, current.midY - f.maxY, 0)
-                if distance < best { best = distance; target = i }
+            let order = Self.readingOrder(frames)
+            if let place = order.firstIndex(of: selection) {
+                let next = place + (direction == .left ? -1 : 1)
+                if order.indices.contains(next) { target = order[next] }
             }
         }
         selectionByClick = false
         guard let target else {
             let text = switch direction {
             case .up: "已经是最上面一张"
-            case .down: "已经是最下面一张"
-            case .left: "已经是最左边一列"
-            case .right: "已经是最右边一列"
+            case .down, .right: "已经是最后一张"
+            case .left: "已经是第一张"
             }
             edgeNotice = EdgeNotice(text: text)
             return
@@ -373,6 +374,33 @@ final class ImageStore: ObservableObject {
         selection = target
         selected = [target]
         anchor = target
+    }
+
+    /// 瀑布流的阅读顺序:一行一行从左往右。
+    ///
+    /// 瀑布流的照片高低不齐,没有现成的行,这里这样分行:
+    /// 每列排在最前面、还没分进行的那张照片里,中线最高的那张定出这一行的水平线;
+    /// 每一列里顶边在这条线以上的那张照片都属于这一行,行内按列从左到右。
+    /// 每一行至少分走一张,所以每张照片都恰好出现一次,最后一行最右边那张就是"最后一张"
+    nonisolated static func readingOrder(_ frames: [CGRect]) -> [Int] {
+        // 按列分组(同一列 x 相同),列内是按序号从上往下排的
+        var byColumn: [CGFloat: [Int]] = [:]
+        for i in frames.indices { byColumn[(frames[i].minX * 2).rounded() / 2, default: []].append(i) }
+        let columns = byColumn.keys.sorted().map { byColumn[$0]! }
+        var heads = [Int](repeating: 0, count: columns.count)
+        var order: [Int] = []
+        order.reserveCapacity(frames.count)
+        while order.count < frames.count {
+            var line = CGFloat.infinity
+            for c in columns.indices where heads[c] < columns[c].count {
+                line = min(line, frames[columns[c][heads[c]]].midY)
+            }
+            for c in columns.indices where heads[c] < columns[c].count {
+                let i = columns[c][heads[c]]
+                if frames[i].minY <= line { order.append(i); heads[c] += 1 }
+            }
+        }
+        return order
     }
 
     /// 点击缩略图:普通点击单选,Shift 连选一段,Command 逐个加减
